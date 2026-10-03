@@ -28,12 +28,21 @@ local function post(payload)
   if not handle then return nil, nil, err end
   local code, body = handle.getResponseCode(), handle.readAll()
   handle.close()
+  if config.debugPath then
+    local f = fs.open(config.debugPath, "w")
+    if f then f.write(body or "") f.close() end
+  end
   return code, textutils.unserialiseJSON(body), body
 end
 
 function M.chat(messages, tools)
   local payload = { model = config.model, messages = messages }
-  if tools and #tools > 0 then payload.tools = tools end
+  if tools and #tools > 0 then
+    payload.tools = tools
+    -- <Claude> By default OpenRouter may route to a provider that silently
+    -- ignores `tools`; only accept providers that implement tool calling.
+    payload.provider = { require_parameters = true }
+  end
 
   for attempt = 1, config.maxRetries do
     local code, data, raw = post(payload)

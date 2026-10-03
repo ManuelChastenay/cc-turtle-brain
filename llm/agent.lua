@@ -52,9 +52,14 @@ function M.run(goal, tools, systemPrompt, onTool)
       role = "assistant",
       content = msg.content or textutils.json_null,
       tool_calls = msg.tool_calls,
+      -- <Claude> Reasoning models need their reasoning sent back between tool calls.
+      reasoning_details = msg.reasoning_details,
     }
     if not msg.tool_calls or #msg.tool_calls == 0 then
-      return msg.content or "", stats
+      if (msg.content or "") == "" then
+        return nil, "empty reply (no text, no tool call); raw response in " .. tostring(config.debugPath)
+      end
+      return msg.content, stats
     end
 
     for _, call in ipairs(msg.tool_calls) do

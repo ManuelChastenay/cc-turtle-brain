@@ -5,9 +5,10 @@
 ]]
 return {
   endpoint   = "https://openrouter.ai/api/v1/chat/completions",
-  model      = "deepseek/deepseek-chat",   -- or "anthropic/claude-haiku-4.5"
+  model      = "deepseek/deepseek-v4-flash", -- or "anthropic/claude-haiku-4.5"
   keyPath    = "/.openrouter_key",
   maxTurns   = 15,                         -- hard cap per goal (cost guard)
   maxRetries = 3,                          -- for 429 / 5xx / timeouts
   appTitle   = "CC Turtle Brain",          -- shown in your OpenRouter dashboard
+  debugPath  = "/llm_last.json",           -- raw body of the last response (nil to disable)
 }
