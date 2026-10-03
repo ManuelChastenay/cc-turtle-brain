@@ -51,7 +51,8 @@ local tools = {
 
 local SYSTEM = [[You control a ComputerCraft turtle in Minecraft through tools.
 Never invent tool results. Check fuel before long trips. When the goal is done
-or impossible, reply with a one-line summary and no tool call.]]
+or impossible, reply with a one-line summary and no tool call.
+Replies show on a plain-text terminal: no markdown.]]
 
 local goal = table.concat({ ... }, " ")
 if goal == "" then write("Goal: ") goal = read() end
