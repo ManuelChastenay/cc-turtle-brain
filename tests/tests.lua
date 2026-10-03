@@ -285,8 +285,10 @@ local function fakeClient(replies)
     local r = table.remove(replies, 1)
     if not r then return nil, "no more scripted replies" end
     if type(r) == "string" then return { role = "assistant", content = r }, { prompt_tokens = 100, completion_tokens = 10 } end
+    -- a list of steps = runPlan; { plans = ... } = runPlans (fleet)
+    local name, args = r.plans and "runPlans" or "runPlan", r.plans and r or { steps = r }
     return { role = "assistant", tool_calls = { { id = "c" .. #calls, type = "function",
-      ["function"] = { name = "runPlan", arguments = textutils.serialiseJSON({ steps = r }) } } } },
+      ["function"] = { name = name, arguments = textutils.serialiseJSON(args) } } } },
       { prompt_tokens = 100, completion_tokens = 30 }
   end }
   return calls
@@ -372,6 +374,249 @@ test("brain.lua end to end + install.lua parses", function()
   eq(#calls, 1)
   truthy(table.concat(out, "\n"):find("Done: mineArea"), table.concat(out, "\n"))
   assert(loadfile(REPO .. "install.lua"))
+end)
+
+---------------------------------------------------------------- fleet: turtle side
+local function quietly(fn, ...)
+  local out, realPrint, realError = {}, print, printError
+  _G.print = function(...)
+    local parts = {}
+    for i = 1, select("#", ...) do parts[i] = tostring((select(i, ...))) end
+    out[#out + 1] = table.concat(parts, " ")
+  end
+  _G.printError = _G.print
+  local res = table.pack(pcall(fn, ...))
+  _G.print, _G.printError = realPrint, realError
+  return out, table.unpack(res, 1, res.n)
+end
+
+test("mineBox: digs exactly the box from any side, ends just above it", function()
+  local boxes = { { 3, 28, 4, 8, 30, 6 }, { 8, 30, 6, 3, 28, 4 }, { -5, 29, -9, -5, 30, -2 }, { 0, 26, 0, 3, 30, 3 } }
+  local starts = { { -10, -10 }, { 20, 0 }, { 0, 20 }, { 15, 15 }, { 5, 5 } }
+  for _, b in ipairs(boxes) do
+    for _, s in ipairs(starts) do
+      sim.reset{ gps = false, turtle = { x = s[1], y = 31, z = s[2], h = 2, fuel = 5000 } }
+      saveState(2)
+      local nav, mine = require("bot.nav"), require("bot.mine")
+      nav.init()
+      local r = mine.mineBox({ x1 = b[1], y1 = b[2], z1 = b[3], x2 = b[4], y2 = b[5], z2 = b[6] })
+      local tag = table.concat(b, ",") .. " from " .. s[1] .. "," .. s[2]
+      truthy(r.ok, tag .. ": " .. tostring(r.error))
+      local box = {}
+      for x = math.min(b[1], b[4]), math.max(b[1], b[4]) do
+        for y = math.min(b[2], b[5]), math.max(b[2], b[5]) do
+          for z = math.min(b[3], b[6]), math.max(b[3], b[6]) do box[sim.key(x, y, z)] = true end
+        end
+      end
+      for _, k in ipairs(sim.dugLog) do truthy(box[k], tag .. ": collateral dig at " .. k) end
+      eq(#sim.dugLog, count(box), tag .. ": dug count")
+      eq(sim.t.y, math.max(b[2], b[5]) + 1, tag .. ": end level")
+    end
+  end
+end)
+
+test("mineBox split: slices cover the box once, sorted turtles get sorted slices", function()
+  sim.reset{}
+  local split
+  for _, s in ipairs(require("bot.skills").list) do if s.name == "mineBox" then split = s.split end end
+  local parts = split({ x1 = 15, y1 = 28, z1 = 0, x2 = 0, y2 = 30, z2 = 5 },
+    { { x = 100, y = 31, z = 0 }, { x = -50, y = 31, z = 0 }, { x = 7, y = 31, z = 0 } })
+  eq(parts[2].x1, 0) eq(parts[2].x2, 4)
+  eq(parts[3].x1, 5) eq(parts[3].x2, 9)
+  eq(parts[1].x1, 10) eq(parts[1].x2, 15)
+  for i = 1, 3 do eq(parts[i].z1, 0) eq(parts[i].z2, 5) eq(parts[i].y1, 28) eq(parts[i].y2, 30) end
+  local few = split({ x1 = 0, y1 = 30, z1 = 0, x2 = 1, y2 = 30, z2 = 0 },
+    { { x = 0, y = 0, z = 0 }, { x = 1, y = 0, z = 0 }, { x = 2, y = 0, z = 0 } })
+  truthy(few[1] and few[2], "two slices") eq(few[3], nil, "third turtle gets none")
+end)
+
+test("another turtle in the way: wait for it, never dig it, give up after a while", function()
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 100 } }
+  sim.set(0, 31, -2, "computercraft:turtle_normal")
+  sim.onSleep = function() if sim.sleeps == 3 then sim.set(0, 31, -2, nil) end end
+  saveState(0)
+  local nav = require("bot.nav")
+  nav.init()
+  truthy(nav.goTo({ x = 0, y = 31, z = -4 }))
+  eq(sim.t.z, -4) eq(#sim.dugLog, 0, "dug")
+  sim.onSleep = nil
+  sim.set(0, 31, -5, "computercraft:turtle_advanced")
+  local before = sim.sleeps
+  local ok, err = nav.goTo({ x = 0, y = 31, z = -8 })
+  eq(ok, false) eq(err, "another turtle is in the way")
+  eq(sim.sleeps - before, require("bot.config").turtleWaits, "waits")
+end)
+
+test("worker: status, plan with progress, busy, rejected plan, stop", function()
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5, label = "miner-1" }
+  local script = {
+    { type = "hello" },
+    { type = "plan", job = "j1", steps = { { skill = "mineArea", direction = "north", length = 3, width = 2, layers = 3 }, { skill = "goHome" } } },
+    { type = "plan", job = "j2", steps = { { skill = "fly" } } },
+    { type = "plan", job = "j3", steps = { { skill = "mineArea", direction = "south", length = 8, width = 8, layers = 3 } } },
+  }
+  sim.onSend = function(_, msg)
+    if msg.type == "progress" and msg.job == "j1" and msg.step == 1 then
+      sim.deliver(99, { type = "hello" })
+      sim.deliver(99, { type = "plan", job = "jx", steps = { { skill = "goHome" } } })
+    elseif msg.type == "progress" and msg.job == "j3" then
+      sim.deliver(99, { type = "stop" })
+    end
+  end
+  sim.onIdle = function()
+    local m = table.remove(script, 1)
+    if m then sim.deliver(99, m) end
+    return m ~= nil
+  end
+  local _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  eq(ok, false) eq(err, "SIM_IDLE")
+  local seq = {}
+  for _, s in ipairs(sim.sent) do
+    eq(s.to, 99) eq(s.proto, "ccbrain")
+    seq[#seq + 1] = s.msg.type .. ":" .. tostring(s.msg.job)
+  end
+  eq(table.concat(seq, " "), "status:nil accepted:j1 progress:j1 status:j1 result:jx progress:j1 result:j1"
+    .. " result:j2 accepted:j3 progress:j3 result:j3")
+  local function msg(i) return sim.sent[i].msg end
+  eq(msg(1).label, "miner-1") eq(msg(1).pos.x, 0)
+  truthy(msg(5).error:find("busy with job j1"), msg(5).error)
+  eq(msg(7).ok, true) truthy(msg(7).summary:find("^Done: mineArea"), msg(7).summary)
+  truthy(msg(8).error:find("plan rejected"), msg(8).error)
+  eq(msg(11).ok, false) eq(msg(11).error, "stopped by the brain")
+  -- the stop cut a command off mid-way: position and heading must still match the world
+  eq(msg(11).pos.x, sim.t.x) eq(msg(11).pos.y, sim.t.y) eq(msg(11).pos.z, sim.t.z)
+  eq(textutils.unserialiseJSON(sim.files["/nav_state.json"]).heading, sim.t.h, "saved heading")
+end)
+
+---------------------------------------------------------------- fleet: brain side, scripted turtles
+-- fakes[id] = { label, pos, mode }; mode: nil (works), "fail", "busy" (never
+-- finishes), "lost" (silent after the plan), "forget" (acts restarted).
+local function fakeFleet(fakes)
+  sim.modem = true
+  sim.onSend = function(to, msg)
+    local ids = {}
+    if to == "broadcast" then
+      for id in pairs(fakes) do ids[#ids + 1] = id end
+      table.sort(ids)
+    else
+      ids[1] = to
+    end
+    for _, id in ipairs(ids) do
+      local f = fakes[id]
+      if f and not f.gone then
+        if msg.type == "hello" then
+          sim.deliver(id, { type = "status", label = f.label, state = "fuel 500", pos = f.pos, job = f.job })
+        elseif msg.type == "plan" then
+          sim.deliver(id, { type = "accepted", job = msg.job })
+          f.steps, f.job = msg.steps, msg.job
+          if f.mode == "lost" then
+            f.gone = true
+          elseif f.mode == "forget" then
+            f.job = nil
+          elseif f.mode ~= "busy" then
+            for i, s in ipairs(msg.steps) do sim.deliver(id, { type = "progress", job = msg.job, step = i, text = s.skill }) end
+            sim.deliver(id, f.mode == "fail"
+              and { type = "result", job = msg.job, ok = false, error = "step 1 (mineBox) failed: bedrock",
+                    completed = "nothing", failed = "mineBox mined=3", state = "fuel 400" }
+              or { type = "result", job = msg.job, ok = true, summary = "Done: " .. #msg.steps .. " steps",
+                   state = "fuel 300", pos = f.pos })
+            f.job = nil
+          end
+        elseif msg.type == "stop" then
+          f.stopped = true
+        end
+      end
+    end
+  end
+end
+
+test("fleet.lua: one LLM call, mineBox split between two turtles, other steps to both", function()
+  sim.reset{}
+  local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } }, [8] = { label = "b", pos = { x = 30, y = 31, z = 0 } } }
+  fakeFleet(fakes)
+  local calls = fakeClient({ { plans = { { turtles = { 8, 7 }, steps = {
+    { skill = "mineBox", x1 = 0, y1 = 28, z1 = 5, x2 = 15, y2 = 30, z2 = 10 }, { skill = "goHome" } } } } } })
+  _G.write, _G.read = io.write, function() return "" end
+  local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "dig", "the", "quarry")
+  truthy(ok, tostring(err))
+  eq(#calls, 1)
+  local user = calls[1].messages[2].content
+  truthy(user:find("#7 a: fuel 500", 1, true) and user:find("#8 b: fuel 500", 1, true), user)
+  eq(fakes[7].steps[1].x1, 0) eq(fakes[7].steps[1].x2, 7)
+  eq(fakes[8].steps[1].x1, 8) eq(fakes[8].steps[1].x2, 15)
+  eq(fakes[7].steps[2].skill, "goHome") eq(fakes[8].steps[2].skill, "goHome")
+  local text = table.concat(out, "\n")
+  truthy(text:find("#7 Done: 2 steps", 1, true) and text:find("#8 Done: 2 steps", 1, true), text)
+end)
+
+test("fleet: a failed turtle sends every outcome and fresh state back to the model", function()
+  sim.reset{}
+  fakeFleet({ [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } },
+              [8] = { label = "b", pos = { x = 30, y = 31, z = 0 }, mode = "fail" } })
+  local calls = fakeClient({ { plans = {
+    { turtles = { 7 }, steps = { { skill = "goHome" } } },
+    { turtles = { 8 }, steps = { { skill = "mineArea", direction = "north", length = 2, width = 2, layers = 2 } } } } },
+    "Turtle 8 hit bedrock." })
+  local fleet, skills = require("bot.fleet"), require("bot.skills")
+  local tools = { runPlans = fleet.tool(skills.list, fleet.discover(2)) }
+  local text, stats = require("llm.agent").run("go", tools, "sys")
+  eq(text, "Turtle 8 hit bedrock.") eq(stats.turns, 2)
+  local payload = textutils.unserialiseJSON(calls[2].messages[calls[2].n].content)
+  eq(payload.ok, false) eq(payload.error, "1 of 2 turtles failed")
+  truthy(payload.results:find("#7 Done: 1 steps", 1, true), payload.results)
+  truthy(payload.results:find("#8 step 1 (mineBox) failed: bedrock; completed: nothing; mineBox mined=3", 1, true), payload.results)
+  truthy(payload.state:find("#8 b: fuel 400", 1, true), payload.state)
+end)
+
+test("fleet: a silent turtle counts as lost, a restarted one as dropped", function()
+  sim.reset{}
+  fakeFleet({ [7] = { label = "a", pos = { x = 0, y = 31, z = 0 }, mode = "lost" },
+              [8] = { label = "b", pos = { x = 9, y = 31, z = 0 }, mode = "forget" } })
+  local fleet, skills = require("bot.fleet"), require("bot.skills")
+  local r = fleet.tool(skills.list, fleet.discover(2)).handler({ plans = { { turtles = { 7, 8 }, steps = { { skill = "goHome" } } } } })
+  eq(r.ok, false)
+  truthy(r.results:find("#7 no answer for 60 s", 1, true), r.results)
+  truthy(r.results:find("#8 turtle restarted or dropped the plan", 1, true), r.results)
+  truthy(sim.now >= 60, "virtual time " .. sim.now)
+end)
+
+test("fleet: bad plans are rejected before anything is sent", function()
+  sim.reset{}
+  fakeFleet({ [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } } })
+  local fleet, skills = require("bot.fleet"), require("bot.skills")
+  local tool = fleet.tool(skills.list, fleet.discover(2))
+  local sentBefore = #sim.sent
+  local function err(plans)
+    local r = tool.handler({ plans = plans })
+    eq(r.ok, false)
+    return r.error
+  end
+  local home = { { skill = "goHome" } }
+  truthy(err({}):find("non%-empty"))
+  truthy(err({ { turtles = { 9 }, steps = home } }):find("no turtle #9", 1, true))
+  truthy(err({ { turtles = { 7 }, steps = home }, { turtles = { 7 }, steps = home } }):find("more than one plan"))
+  truthy(err({ { turtles = { 7 }, steps = { { skill = "fly" } } } }):find("plan 1: step 1: unknown skill fly", 1, true))
+  eq(#sim.sent, sentBefore, "messages sent")
+end)
+
+test("fleet: Ctrl+T while waiting stops the turtles still working", function()
+  sim.reset{}
+  local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 }, mode = "busy" },
+                  [8] = { label = "b", pos = { x = 9, y = 31, z = 0 } } }
+  fakeFleet(fakes)
+  local reply, pings = sim.onSend, 0
+  sim.onSend = function(to, msg, proto)
+    reply(to, msg, proto)
+    if to == 7 and msg.type == "hello" then
+      pings = pings + 1
+      if pings == 2 then os.queueEvent("terminate") end
+    end
+  end
+  local fleet, skills = require("bot.fleet"), require("bot.skills")
+  local tool = fleet.tool(skills.list, fleet.discover(2))
+  local ok, err = pcall(tool.handler, { plans = { { turtles = { 7, 8 }, steps = { { skill = "goHome" } } } } })
+  eq(ok, false) eq(err, "Terminated")
+  eq(fakes[7].stopped, true) eq(fakes[8].stopped, nil)
 end)
 
 print(("passed %d, failed %d"):format(passed, failed))

@@ -179,6 +179,8 @@ end
 
 ---------------------------------------------------------------- movement
 
+local TURTLE_IN_WAY = "another turtle is in the way"
+
 -- <Claude> Clears the block on side ("forward", "up", "down"). Air and liquids
 -- count as clear. Loops because gravel and sand fall back into the gap.
 function M.dig(side)
@@ -186,6 +188,7 @@ function M.dig(side)
     if not DETECT[side]() then return true end
     local _, block = INSPECT[side]()
     local name = type(block) == "table" and block.name or "unknown"
+    if name:find("computercraft:turtle", 1, true) then return false, TURTLE_IN_WAY end
     if matches(name, config.protect) then return false, "protected block in the way: " .. name end
     local ok, reason = DIG[side]()
     if not ok then return false, ("cannot dig %s: %s"):format(name, tostring(reason)) end
@@ -196,26 +199,36 @@ function M.dig(side)
 end
 
 -- <Claude> One block forward/up/down, digging first. An obstruction with no
--- block is a mob or player: wait, then attack.
+-- block is a mob or player: wait, then attack. Another turtle in the way:
+-- wait for it to move on (random delays so two turtles meeting head-on do
+-- not retry in lockstep), then give up.
 function M.step(side)
   if side == "forward" and not heading then return false, NO_HEADING end
   if M.fuel() < 1 and not M.refuel(1) then return false, "out of fuel" end
-  for attempt = 1, 8 do
+  local obstructed, waited = 0, 0
+  while true do
     local cleared, err = M.dig(side)
-    if not cleared then return false, err end
-    local moved, reason = MOVE[side]()
-    if moved then
-      if side == "up" then pos.y = pos.y + 1
-      elseif side == "down" then pos.y = pos.y - 1
-      else pos.x, pos.z = pos.x + DX[heading], pos.z + DZ[heading] end
-      save()
-      return true
+    if cleared then
+      local moved, reason = MOVE[side]()
+      if moved then
+        if side == "up" then pos.y = pos.y + 1
+        elseif side == "down" then pos.y = pos.y - 1
+        else pos.x, pos.z = pos.x + DX[heading], pos.z + DZ[heading] end
+        save()
+        return true
+      end
+      if reason ~= "Movement obstructed" then return false, reason end
+      obstructed = obstructed + 1
+      if obstructed > 8 then return false, ("path blocked at %d,%d,%d"):format(pos.x, pos.y, pos.z) end
+      if obstructed > 2 then ATTACK[side]() end
+      sleep(0.5)
+    elseif err == TURTLE_IN_WAY and waited < config.turtleWaits then
+      waited = waited + 1
+      sleep(0.5 + math.random())
+    else
+      return false, err
     end
-    if reason ~= "Movement obstructed" then return false, reason end
-    if attempt > 2 then ATTACK[side]() end
-    sleep(0.5)
   end
-  return false, ("path blocked at %d,%d,%d"):format(pos.x, pos.y, pos.z)
 end
 
 -- <Claude> Walks axis by axis in `order` (default: climb first, descend last).

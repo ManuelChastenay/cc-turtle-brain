@@ -1,9 +1,12 @@
 --[[ <Claude>
   Fake CC: Tweaked environment for testing outside Minecraft. sim.reset{...}
   builds a world (terrain function + overrides) and a turtle; the globals
-  turtle, gps, fs, textutils, peripheral and sleep mimic CC closely enough
-  for bot/* and llm/agent.lua (same failure strings as CC, falling gravel,
-  mobs, chests). Not a full emulator: check new turtle APIs against the CC docs.
+  turtle, gps, fs, textutils, peripheral, os, parallel, rednet and sleep
+  mimic CC closely enough for bot/*, worker.lua, fleet.lua and
+  llm/agent.lua (same failure strings as CC, falling gravel, mobs, chests,
+  events and virtual time). One simulated computer per test: the other side
+  of rednet is scripted through sim.onSend / sim.deliver / sim.onIdle.
+  Not a full emulator: check new CC APIs against the CC docs.
 ]]
 local sim = {}
 _G.sim = sim
@@ -127,6 +130,11 @@ function sim.reset(o)
   sim.sleeps, sim.moves, sim.lost, sim.attacks = 0, 0, 0, 0
   sim.dugLog = {}          -- keys dug, in order
   sim.terminateAtMove = nil
+  -- computer, events and rednet (see the bottom of this file)
+  sim.id, sim.label, sim.modem = o.id or 1, o.label, o.modem or false
+  sim.now, sim.events, sim.timers, sim.lastTimer = 0, {}, {}, 0
+  sim.sent = {}            -- every rednet message sent: { to, msg, proto }
+  sim.onSend, sim.onIdle, sim.onSleep = nil, nil, nil
   local t = o.turtle or {}
   sim.t = { x = t.x or 0, y = t.y or 31, z = t.z or 0, h = t.h or 0, fuel = t.fuel or 1000, limit = 20000,
     inv = {}, sel = 1 }
@@ -296,10 +304,143 @@ _G.turtle = {
   end,
 }
 
+---------------------------------------------------------------- events, os, parallel
+-- The main Lua thread plays CC's top level: when it waits for an event it
+-- runs the queue itself (sim.events, then timers in virtual time sim.now,
+-- then sim.onIdle() for the test to inject more; nothing left = error
+-- "SIM_IDLE"). Inside parallel's coroutines, waiting yields like in CC.
+local function isMain()
+  local _, main = coroutine.running()
+  return main
+end
+
+local function nextEvent()
+  while true do
+    local ev = table.remove(sim.events, 1)
+    if ev then return ev end
+    if #sim.timers > 0 then
+      table.sort(sim.timers, function(a, b) return a.at < b.at end)
+      local t = table.remove(sim.timers, 1)
+      sim.now = math.max(sim.now, t.at)
+      if sim.now > 3600 then error("SIM_TIMEOUT: over an hour of virtual time", 0) end
+      return table.pack("timer", t.id)
+    end
+    if not (sim.onIdle and sim.onIdle()) then error("SIM_IDLE", 0) end
+  end
+end
+
+os.clock = function() return sim.now end
+os.epoch = function() return math.floor(sim.now * 1000) end
+os.getComputerID = function() return sim.id end
+os.getComputerLabel = function() return sim.label end
+os.queueEvent = function(...) sim.events[#sim.events + 1] = table.pack(...) end
+os.startTimer = function(t)
+  sim.lastTimer = sim.lastTimer + 1
+  sim.timers[#sim.timers + 1] = { id = sim.lastTimer, at = sim.now + t }
+  return sim.lastTimer
+end
+os.cancelTimer = function(id)
+  for i, t in ipairs(sim.timers) do
+    if t.id == id then table.remove(sim.timers, i) return end
+  end
+end
+os.pullEventRaw = function(filter)
+  if not isMain() then return coroutine.yield(filter) end
+  while true do
+    local ev = nextEvent()
+    if filter == nil or ev[1] == filter then return table.unpack(ev, 1, ev.n) end
+  end
+end
+os.pullEvent = function(filter)
+  local ev = table.pack(os.pullEventRaw(filter))
+  if ev[1] == "terminate" then error("Terminated", 0) end
+  return table.unpack(ev, 1, ev.n)
+end
+
+local function runAll(fns, any)
+  local cos, filters, alive = {}, {}, #fns
+  for i, fn in ipairs(fns) do cos[i] = coroutine.create(fn) end
+  local function resume(i, ev)
+    local co = cos[i]
+    if not co then return false end
+    if ev and filters[i] and filters[i] ~= ev[1] and ev[1] ~= "terminate" then return false end
+    local res = ev and table.pack(coroutine.resume(co, table.unpack(ev, 1, ev.n))) or table.pack(coroutine.resume(co))
+    if not res[1] then error(res[2], 0) end
+    if coroutine.status(co) == "dead" then cos[i], alive = nil, alive - 1 return true end
+    filters[i] = res[2]
+    return false
+  end
+  for i = 1, #fns do if resume(i) and any then return i end end
+  while alive > 0 do
+    local ev = isMain() and nextEvent() or table.pack(coroutine.yield())
+    for i = 1, #fns do if resume(i, ev) and any then return i end end
+  end
+end
+_G.parallel = {
+  waitForAny = function(...) return runAll({ ... }, true) end,
+  waitForAll = function(...) runAll({ ... }, false) end,
+}
+
+-- Real turtle commands yield until the server answers (turtle_response);
+-- doing the same here lets the other coroutines run in between.
+for _, name in ipairs({ "forward", "back", "up", "down", "turnLeft", "turnRight", "dig", "digUp", "digDown",
+    "attack", "attackUp", "attackDown", "drop", "dropUp", "dropDown", "refuel" }) do
+  local fn = turtle[name]
+  turtle[name] = function(...)
+    local r = table.pack(fn(...))
+    if not isMain() then
+      os.queueEvent("turtle_response")
+      os.pullEvent("turtle_response")
+    end
+    return table.unpack(r, 1, r.n)
+  end
+end
+
+---------------------------------------------------------------- rednet
+local function copy(v)
+  if type(v) ~= "table" then return v end
+  local out = {}
+  for k, x in pairs(v) do out[k] = copy(x) end
+  return out
+end
+
+-- Test side: a message arriving at this computer.
+function sim.deliver(from, msg, proto)
+  os.queueEvent("rednet_message", from, copy(msg), proto or "ccbrain")
+end
+
+local function send(to, msg, proto)
+  msg = copy(msg)
+  sim.sent[#sim.sent + 1] = { to = to, msg = msg, proto = proto }
+  if sim.onSend then sim.onSend(to, msg, proto) end
+  return true
+end
+
+_G.rednet = {
+  open = function() end,
+  send = send,
+  broadcast = function(msg, proto) send("broadcast", msg, proto) end,
+  receive = function(proto, timeout)
+    local timer = timeout and os.startTimer(timeout)
+    while true do
+      local ev = table.pack(os.pullEvent())
+      if ev[1] == "rednet_message" and (proto == nil or ev[4] == proto) then
+        if timer then os.cancelTimer(timer) end
+        return ev[2], ev[3], ev[4]
+      elseif ev[1] == "timer" and ev[2] == timer then
+        return nil
+      end
+    end
+  end,
+}
+
+---------------------------------------------------------------- peripherals, files
 _G.gps = { locate = function() if sim.gps then return sim.t.x, sim.t.y, sim.t.z end end }
 
 _G.peripheral = {
+  getNames = function() return sim.modem and { "left" } or {} end,
   hasType = function(side, t)
+    if t == "modem" then return sim.modem and side == "left" end
     if t ~= "inventory" then return nil end
     return sim.chests[key(target(side))] ~= nil
   end,
@@ -317,7 +458,13 @@ _G.fs = {
   end,
 }
 
-_G.sleep = function() sim.sleeps = sim.sleeps + 1 end
+_G.sleep = function(t)
+  sim.sleeps = sim.sleeps + 1
+  if sim.onSleep then sim.onSleep() end
+  if isMain() then sim.now = sim.now + (t or 0) return end
+  local id = os.startTimer(t or 0)
+  repeat local _, fired = os.pullEvent("timer") until fired == id
+end
 _G.print = print
 _G.printError = function(...) print("ERR", ...) end
 

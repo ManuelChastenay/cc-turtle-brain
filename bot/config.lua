@@ -11,5 +11,6 @@ return {
     "computercraft:", "chest", "barrel", "shulker_box", "furnace", "_door", "glass", "_bed",
   },
   falling    = { "gravel", "sand", "concrete_powder" }, -- re-checked after digging
+  turtleWaits = 20,               -- ~1 s retries when another turtle blocks the way
   maxSteps   = 20,                -- longest plan accepted from the LLM
 }

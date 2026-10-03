@@ -67,9 +67,10 @@ function M.catalog(skills)
   return table.concat(lines, "\n")
 end
 
--- <Claude> Steps are flat objects; their properties are the union of every
--- skill's args (enums merged). Per-skill rules are enforced by M.check.
-local function schema(skills)
+-- <Claude> JSON schema of one step. Steps are flat objects; their properties
+-- are the union of every skill's args (enums merged). Per-skill rules are
+-- enforced by M.check.
+function M.stepSchema(skills)
   local props = { skill = { type = "string", enum = {} } }
   for _, skill in ipairs(skills) do
     table.insert(props.skill.enum, skill.name)
@@ -86,9 +87,7 @@ local function schema(skills)
       end
     end
   end
-  return { type = "object", required = { "steps" }, properties = {
-    steps = { type = "array", items = { type = "object", required = { "skill" }, properties = props } },
-  } }
+  return { type = "object", required = { "skill" }, properties = props }
 end
 
 -- <Claude> Validates the whole plan before anything moves.
@@ -116,6 +115,13 @@ function M.check(steps, skills)
     out[i] = { skill = skill, args = args }
   end
   return out
+end
+
+-- <Claude> A checked step back to plain data ({ skill = name, ...args }) for rednet.
+function M.flatten(name, args)
+  local step = { skill = name }
+  for key, value in pairs(args) do step[key] = value end
+  return step
 end
 
 -- <Claude> "mineArea direction=north length=6 ..." (args in declaration order).
@@ -156,6 +162,20 @@ function M.run(steps, onStep)
   return true, #steps, results
 end
 
+-- <Claude> Turns M.run's return values into a compact report:
+-- { ok = true, summary } | { ok = false, error, failed, completed }.
+function M.report(steps, ok, n, results)
+  local done = {}
+  for i = 1, ok and n or n - 1 do done[i] = outcome(steps[i], results[i]) end
+  if ok then return { ok = true, summary = "Done: " .. table.concat(done, "; ") } end
+  return {
+    ok = false,
+    error = ("step %d (%s) failed: %s"):format(n, steps[n].skill.name, tostring(results[n].error)),
+    failed = outcome(steps[n], results[n]),
+    completed = #done > 0 and table.concat(done, "; ") or "nothing",
+  }
+end
+
 -- <Claude> The runPlan tool for llm/agent.lua. It is `final`: a plan that
 -- succeeds ends the run with a Lua-written summary, no extra LLM call.
 -- A failure returns the step's result, what got done and fresh state, so
@@ -163,22 +183,16 @@ end
 function M.tool(skills, state, onStep)
   return {
     description = "Run skills in order on the turtle. Nothing is reported back unless a step fails.",
-    parameters = schema(skills),
+    parameters = { type = "object", required = { "steps" }, properties = {
+      steps = { type = "array", items = M.stepSchema(skills) },
+    } },
     final = true,
     handler = function(a)
       local steps, err = M.check(a.steps, skills)
       if not steps then return { ok = false, error = "plan rejected, nothing ran: " .. err } end
-      local ok, n, results = M.run(steps, onStep)
-      local done = {}
-      for i = 1, ok and n or n - 1 do done[i] = outcome(steps[i], results[i]) end
-      if ok then return { ok = true, summary = "Done: " .. table.concat(done, "; ") } end
-      return {
-        ok = false,
-        error = ("step %d (%s) failed: %s"):format(n, steps[n].skill.name, tostring(results[n].error)),
-        failed = outcome(steps[n], results[n]),
-        completed = #done > 0 and table.concat(done, "; ") or "nothing",
-        state = state(),
-      }
+      local report = M.report(steps, M.run(steps, onStep))
+      if not report.ok then report.state = state() end
+      return report
     end,
   }
 end

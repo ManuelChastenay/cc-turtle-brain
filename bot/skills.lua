@@ -1,18 +1,49 @@
 --[[ <Claude>
   Skills the planner can put in a plan. Each is declared once:
-    { name, doc, args = { { argName, type, default } }, run = function(args) -> result }
+    { name, doc, args = { { argName, type, default } }, run = function(args) -> result,
+      split = function(args, positions) -> argsPerTurtle }   -- optional, fleet only
   An arg with a default is optional; types are listed in bot/plan.lua.
   run returns { ok = true, ... } or { ok = false, error = "..." }; extra
-  scalar fields show up in the run summary. Keep docs short: they are sent
-  with every LLM call.
+  scalar fields show up in the run summary. split divides one step between
+  the turtles of a fleet group (see bot/fleet.lua). Keep docs short: they
+  are sent with every LLM call.
 ]]
-local nav = require("bot.nav")
-local inv = require("bot.inv")
-local mine = require("bot.mine")
+
+-- <Claude> Turtle modules load on first use, so the fleet brain (a computer,
+-- no turtle API) can read the declarations and split functions.
+local function lazy(name)
+  return setmetatable({}, { __index = function(_, key) return require(name)[key] end })
+end
+local nav, inv, mine = lazy("bot.nav"), lazy("bot.inv"), lazy("bot.mine")
 
 local M = {}
 
 local function fail(err) return { ok = false, error = err } end
+
+-- <Claude> Slices a mineBox along its longer side, one slice per turtle (fewer
+-- if the box is narrower than the group). Turtles sorted along that side get
+-- the slices in the same order, so each starts near its own. Runs on the brain.
+local function splitBox(a, positions)
+  local alongX = math.abs(a.x2 - a.x1) >= math.abs(a.z2 - a.z1)
+  local axis, k1, k2 = alongX and "x" or "z", alongX and "x1" or "z1", alongX and "x2" or "z2"
+  local lo, hi = math.min(a[k1], a[k2]), math.max(a[k1], a[k2])
+  local size = hi - lo + 1
+  local n = math.min(#positions, size)
+  local order = {}
+  for i = 1, #positions do order[i] = i end
+  table.sort(order, function(i, j)
+    local pi, pj = positions[i][axis], positions[j][axis]
+    return pi < pj or (pi == pj and i < j)
+  end)
+  local parts = {}
+  for k = 1, n do
+    local part = {}
+    for key, value in pairs(a) do part[key] = value end
+    part[k1], part[k2] = lo + math.floor((k - 1) * size / n), lo + math.floor(k * size / n) - 1
+    parts[order[k]] = part
+  end
+  return parts
+end
 
 -- <Claude> Refuels from the inventory for the whole trip before moving.
 local function travel(target)
@@ -34,7 +65,15 @@ M.list = {
       { "direction", "dir" }, { "length", "count" }, { "width", "count" }, { "layers", "count" },
       { "vertical", "down|up", "down" }, { "side", "right|left|center", "right" },
     },
-    run = mine.mineArea,
+    run = function(a) return mine.mineArea(a) end,
+  },
+  {
+    name = "mineBox",
+    doc = "Dig out the box between two corners (world coordinates, all blocks included)."
+      .. " Enters from above its nearest top corner and ends there.",
+    args = { { "x1", "int" }, { "y1", "int" }, { "z1", "int" }, { "x2", "int" }, { "y2", "int" }, { "z2", "int" } },
+    run = function(a) return mine.mineBox(a) end,
+    split = splitBox,
   },
   {
     name = "goTo",

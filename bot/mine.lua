@@ -1,5 +1,6 @@
 --[[ <Claude>
   mineArea: digs out a box next to the turtle and comes back to the start.
+  mineBox: same digging for a box given by world coordinates (fleet jobs).
   Local frame: a = blocks ahead (toward direction), r = blocks to the right,
   l = layers above the start level. Layers are taken three at a time: the
   turtle walks the middle one and digs up and down, so a 3-deep area costs
@@ -45,10 +46,27 @@ local function visits(length, rows, layers)
   return list
 end
 
--- <Claude> args: direction, length, width, layers, vertical ("down"|"up"), side ("right"|"left"|"center").
-function M.mineArea(args)
-  local h, err = nav.resolve(args.direction)
-  if not h then return { ok = false, error = err } end
+-- <Claude> Cells to visit, the door (box cell the turtle enters and leaves
+-- through) and the number of moves, all in the local frame.
+-- args: length, width, layers, vertical ("down"|"up"), side ("right"|"left"|"center").
+local function layout(args)
+  local rows, first = {}, ({ right = 0, left = 0, center = -math.floor((args.width - 1) / 2) })[args.side]
+  for k = 1, args.width do rows[k] = first + (k - 1) * (args.side == "left" and -1 or 1) end
+  local layers, entry = {}, args.vertical == "up" and 0 or -1
+  for i = 1, args.layers do layers[i] = entry + (i - 1) * (args.vertical == "up" and 1 or -1) end
+  local list = visits(args.length, rows, layers)
+  local door = { a = 1, r = 0, l = entry }
+  local moves = dist(ORIGIN, door) * 2 + dist(door, list[1]) + dist(list[#list], door)
+  for i = 2, #list do moves = moves + dist(list[i - 1], list[i]) end
+  return list, door, moves
+end
+
+local function fuelError(need)
+  return { ok = false, error = ("needs about %d fuel, has %d: put coal in the turtle"):format(need, nav.fuel()) }
+end
+
+-- <Claude> Digs the box toward heading h from where the turtle stands.
+local function dig(h, args)
   local startHeading, origin = nav.heading(), nav.pos()
   if not startHeading then return { ok = false, error = "heading unknown (no GPS fix to calibrate it)" } end
 
@@ -56,20 +74,9 @@ function M.mineArea(args)
   local rx, rz = nav.vector((h + 1) % 4)
   local axes = { a = fx ~= 0 and "x" or "z", r = rx ~= 0 and "x" or "z", l = "y" }
 
-  local rows, first = {}, ({ right = 0, left = 0, center = -math.floor((args.width - 1) / 2) })[args.side]
-  for k = 1, args.width do rows[k] = first + (k - 1) * (args.side == "left" and -1 or 1) end
-  local layers, entry = {}, args.vertical == "up" and 0 or -1
-  for i = 1, args.layers do layers[i] = entry + (i - 1) * (args.vertical == "up" and 1 or -1) end
-  local list = visits(args.length, rows, layers)
-  local door = { a = 1, r = 0, l = entry } -- box cell the turtle enters and leaves through
-
+  local list, door, moves = layout(args)
   local function exitCost(c) return dist(c, door) + dist(door, ORIGIN) end
-  local moves = exitCost(list[1]) + exitCost(list[#list])
-  for i = 2, #list do moves = moves + dist(list[i - 1], list[i]) end
-  local need = moves + config.fuelMargin
-  if not nav.refuel(need) then
-    return { ok = false, error = ("needs about %d fuel, has %d: put coal in the turtle"):format(need, nav.fuel()) }
-  end
+  if not nav.refuel(moves + config.fuelMargin) then return fuelError(moves + config.fuelMargin) end
 
   local function go(c, order)
     local target = { x = origin.x + c.a * fx + c.r * rx, y = origin.y + c.l, z = origin.z + c.a * fz + c.r * rz }
@@ -144,6 +151,42 @@ function M.mineArea(args)
   end
   nav.face(startHeading)
   return { ok = true, mined = nav.dug - dug0, trips = trips }
+end
+
+-- <Claude> args: direction plus the layout() args. Box relative to the turtle.
+function M.mineArea(args)
+  local h, err = nav.resolve(args.direction)
+  if not h then return { ok = false, error = err } end
+  return dig(h, args)
+end
+
+-- <Claude> args: x1, y1, z1, x2, y2, z2 (opposite corners, any order).
+-- Enters from just above the box at its top corner nearest the turtle, digs
+-- top-down with rows along the longer side, and ends at that entry point.
+function M.mineBox(a)
+  local lo = { x = math.min(a.x1, a.x2), y = math.min(a.y1, a.y2), z = math.min(a.z1, a.z2) }
+  local hi = { x = math.max(a.x1, a.x2), y = math.max(a.y1, a.y2), z = math.max(a.z1, a.z2) }
+  local p = nav.pos()
+  local function nearest(v, low, high) return math.abs(v - low) <= math.abs(v - high) and low or high end
+  local cx, cz = nearest(p.x, lo.x, hi.x), nearest(p.z, lo.z, hi.z)
+  local sizeX, sizeZ = hi.x - lo.x + 1, hi.z - lo.z + 1
+  local alongX = sizeX >= sizeZ
+  local h -- rows run from the corner into the box along the longer side
+  if alongX then h = cx == lo.x and 1 or 3 else h = cz == lo.z and 2 or 0 end
+  local fx, fz = nav.vector(h)
+  local rx, rz = nav.vector((h + 1) % 4)
+  local inward = alongX and (cz == lo.z and 1 or -1) or (cx == lo.x and 1 or -1)
+  local args = {
+    length = alongX and sizeX or sizeZ, width = alongX and sizeZ or sizeX, layers = hi.y - lo.y + 1,
+    vertical = "down", side = (alongX and rz or rx) == inward and "right" or "left",
+  }
+  local entry = { x = cx - fx, y = hi.y + 1, z = cz - fz }
+  local _, _, moves = layout(args)
+  local need = nav.distance(p, entry) + moves + config.fuelMargin
+  if not nav.refuel(need) then return fuelError(need) end
+  local ok, err = nav.goTo(entry)
+  if not ok then return { ok = false, error = "could not reach the box: " .. err } end
+  return dig(h, args)
 end
 
 return M

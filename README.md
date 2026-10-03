@@ -20,6 +20,15 @@ Update later with `install`.
 
 Secrets (`/.openrouter_key`, `/.github_token`) are never committed.
 
+## Fleet
+One computer plans, the turtles work in parallel.
+
+1. Every turtle: label it, `install`, give it a wireless or ender modem, a pickaxe and coal. Then run `worker`, or make it start by itself: `edit startup.lua`, write `shell.run("worker")`, save, reboot.
+2. The brain computer: a modem (ender modems avoid range problems), `install`, `edit /.openrouter_key`.
+3. On the computer: `fleet <goal>`, e.g. `fleet all turtles dig out x 100 to 131, z 40 to 55, y 60 to 50, then go home`.
+
+A shared dig (`mineBox`) is cut into one slice per turtle, nearest slice to each. Turtles answer the brain while they work. One silent for 60 s (unloaded chunk, out of range) is reported as lost. Ctrl+T on the computer stops every turtle still working. Keep the area chunk-loaded.
+
 ## Tests (dev machine)
 ```
 pip install lupa
