@@ -10,6 +10,7 @@ local TOKEN_PATH = "/.github_token"
 local FILES = {
   "install.lua", "brain.lua",
   "llm/config.lua", "llm/openrouter.lua", "llm/agent.lua",
+  "bot/config.lua", "bot/nav.lua", "bot/inv.lua", "bot/mine.lua", "bot/skills.lua", "bot/plan.lua",
 }
 
 local function readToken()

@@ -2,7 +2,12 @@
   Provider-agnostic tool-calling loop. Tools are injected, so the same loop
   drives a local turtle now and rednet-dispatched turtles later.
   tools = { name = { description = "...", parameters = <JSON schema table>,
-                     handler = function(args) return resultTable end } }
+                     handler = function(args) return resultTable end,
+                     final = true } }  -- optional, see below
+  Calls in one turn run in order; after a failed call the rest are skipped.
+  A successful call to a `final` tool ends the run right away (its
+  result.summary is the reply), saving the LLM round trip that would only
+  say "done".
 ]]
 local client = require("llm.openrouter")
 local config = require("llm.config")
@@ -21,13 +26,18 @@ local function toSchema(tools)
   return list
 end
 
--- <Claude> Handler errors are returned to the model instead of crashing the loop.
+-- <Claude> Handler errors are returned to the model instead of crashing the
+-- loop, except Ctrl+T, which must still stop the program.
 local function runTool(tools, call)
   local tool = tools[call["function"].name]
   if not tool then return { ok = false, error = "unknown tool" } end
   local args = textutils.unserialiseJSON(call["function"].arguments or "") or {}
   local ok, result = pcall(tool.handler, args)
-  if not ok then return { ok = false, error = tostring(result) } end
+  if not ok then
+    if result == "Terminated" then error(result, 0) end
+    return { ok = false, error = tostring(result) }
+  end
+  if type(result) ~= "table" then return { ok = false, error = "tool returned no result" } end
   return result
 end
 
@@ -62,12 +72,23 @@ function M.run(goal, tools, systemPrompt, onTool)
       return msg.content, stats
     end
 
+    -- <Claude> Every call still gets a tool message, as the API requires.
+    local failed, final = false, nil
     for _, call in ipairs(msg.tool_calls) do
-      local result = runTool(tools, call)
-      if onTool then onTool(call["function"].name, result) end
+      local name = call["function"].name
+      local result = failed and { ok = false, error = "skipped: an earlier call failed" } or runTool(tools, call)
+      if onTool then onTool(name, result) end
       messages[#messages + 1] = {
         role = "tool", tool_call_id = call.id, content = textutils.serialiseJSON(result),
       }
+      if result.ok == false then
+        failed = true
+      elseif tools[name] and tools[name].final then
+        final = result
+      end
+    end
+    if final and not failed then
+      return final.summary or textutils.serialiseJSON(final), stats
     end
   end
   return nil, "max turns reached (" .. config.maxTurns .. ")"
