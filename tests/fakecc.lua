@@ -153,6 +153,7 @@ function sim.reset(o)
   sim.id, sim.label, sim.modem = o.id or 1, o.label, o.modem or false
   sim.now, sim.events, sim.timers, sim.lastTimer = 0, {}, {}, 0
   sim.sent = {}            -- every rednet message sent: { to, msg, proto }
+  sim.monitors = {}        -- attached fake monitors (sim.screen), found by peripheral.find("monitor")
   sim.onSend, sim.onIdle, sim.onSleep, sim.onMove = nil, nil, nil, nil
   sim.t = newTurtle(sim.id, o.turtle)
   sim.files = sim.t.files
@@ -374,6 +375,10 @@ local function makePeripheral(get, modem)
       if other and method == "getID" then return other.id end
       error("No peripheral attached", 2)
     end,
+    find = function(ty)
+      if ty == "monitor" then return table.unpack(sim.monitors) end
+    end,
+    getName = function(p) return p.side end,
   }
 end
 
@@ -536,8 +541,78 @@ _G.rednet = {
   end,
 }
 
+---------------------------------------------------------------- screens
+_G.colors = { white = 1, orange = 2, magenta = 4, lightBlue = 8, yellow = 16, lime = 32, pink = 64, gray = 128,
+  lightGray = 256, cyan = 512, purple = 1024, blue = 2048, brown = 4096, green = 8192, red = 16384, black = 32768 }
+_G.keys = { enter = 257, numPadEnter = 335, backspace = 259, delete = 261, left = 263, right = 262, up = 265,
+  down = 264, home = 268, ["end"] = 269 }
+
+-- A fake terminal or monitor: a w x h grid of characters with the colors set
+-- when each was written. screen.lines() gives the rows as strings, and
+-- screen.at(x, y) the { char, fg, bg } of a cell. Monitors (color = true is an
+-- advanced one) also have setTextScale; sim.useTerm(w, h) makes one the
+-- global `term`, sim.addMonitor(w, h, side) attaches one for peripheral.find.
+function sim.screen(w, h, color, side)
+  local s = { w = w, h = h, side = side, scale = 1, blink = false, cx = 1, cy = 1, fg = 1, bg = 32768 }
+  local grid
+  local function blank()
+    grid = {}
+    for y = 1, h do
+      grid[y] = {}
+      for x = 1, w do grid[y][x] = { " ", 1, 32768 } end
+    end
+  end
+  blank()
+  s.getSize = function() return s.w, s.h end
+  s.isColor = function() return color == true end
+  s.isColour = s.isColor
+  s.setCursorPos = function(x, y) s.cx, s.cy = x, y end
+  s.getCursorPos = function() return s.cx, s.cy end
+  s.setCursorBlink = function(b) s.blink = b end
+  s.setTextColor = function(c) s.fg = c end
+  s.setBackgroundColor = function(c) s.bg = c end
+  s.setTextScale = function(n)
+    if type(n) ~= "number" or n < 0.5 or n > 5 or n * 2 ~= math.floor(n * 2) then error("Expected number in range 0.5-5", 2) end
+    s.scale = n
+  end
+  s.write = function(text)
+    text = tostring(text)
+    for i = 1, #text do
+      local cell = grid[s.cy] and grid[s.cy][s.cx]
+      if cell then cell[1], cell[2], cell[3] = text:sub(i, i), s.fg, s.bg end
+      s.cx = s.cx + 1
+    end
+  end
+  s.clear = blank
+  s.clearLine = function()
+    for x = 1, w do grid[s.cy][x] = { " ", 1, 32768 } end
+  end
+  s.at = function(x, y) return table.unpack(grid[y][x]) end
+  s.lines = function()
+    local rows = {}
+    for y = 1, h do
+      local row = {}
+      for x = 1, w do row[x] = grid[y][x][1] end
+      rows[y] = table.concat(row)
+    end
+    return rows
+  end
+  return s
+end
+
+function sim.useTerm(w, h, color)
+  _G.term = sim.screen(w, h, color)
+  return _G.term
+end
+
+function sim.addMonitor(w, h, side, color)
+  local m = sim.screen(w, h, color ~= false, side or "top")
+  sim.monitors[#sim.monitors + 1] = m
+  return m
+end
+
 ---------------------------------------------------------------- peripherals, files
-_G.gps = { locate = function() if sim.gps then return sim.t.x, sim.t.y, sim.t.z end end }
+_G.gps ={ locate = function() if sim.gps then return sim.t.x, sim.t.y, sim.t.z end end }
 _G.peripheral = makePeripheral(function() return sim.t end, function() return sim.modem end)
 _G.fs = makeFs(function() return sim.t.files end)
 

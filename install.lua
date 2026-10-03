@@ -11,7 +11,7 @@ local FILES = {
   "brain.lua", "fleet.lua", "worker.lua", -- install.lua updates itself first, see below
   "llm/config.lua", "llm/openrouter.lua", "llm/agent.lua",
   "bot/config.lua", "bot/nav.lua", "bot/inv.lua", "bot/mine.lua", "bot/skills.lua", "bot/plan.lua",
-  "bot/net.lua", "bot/fleet.lua", "bot/job.lua",
+  "bot/net.lua", "bot/fleet.lua", "bot/job.lua", "bot/ui.lua", "bot/registry.lua", "bot/dash.lua",
 }
 
 local function readToken()

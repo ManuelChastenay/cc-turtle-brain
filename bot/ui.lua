@@ -84,7 +84,7 @@ local function turtleRow(t, c, w, y, buttons, lowFuel)
     STATE_COLOR[t.state] or "white")
   if c.pos > 0 then row[#row + 1] = chunk(pad(posText(t.pos), c.pos + 1), "lightGray") end
   local fuel = t.fuel
-  row[#row + 1] = chunk(rpad(fuel == nil and "?" or tostring(fuel), c.fuel) .. " ",
+  row[#row + 1] = chunk(rpad(fuel == nil and "?" or fuel == "unlimited" and "inf" or tostring(fuel), c.fuel) .. " ",
     type(fuel) == "number" and fuel < lowFuel and "red" or "white")
   row[#row + 1] = chunk(pad(detail(t), w - fixedWidth(c)), t.state == "lost" and "red" or "white")
   if c.stop > 0 then
@@ -206,12 +206,13 @@ function M.draw(t, view)
   local w, h = t.getSize()
   local layout = M.layout(view, w, h)
   local color = colors and t.isColor and t.isColor()
+  local fg, bg -- last colors set: peripheral calls are not free, so only change what changed
   for y, row in ipairs(layout.rows) do
     t.setCursorPos(1, y)
     for _, c in ipairs(row) do
       if color then
-        t.setTextColor(colors[c.fg] or colors.white)
-        t.setBackgroundColor(colors[c.bg] or colors.black)
+        if c.fg ~= fg then fg = c.fg t.setTextColor(colors[fg] or colors.white) end
+        if c.bg ~= bg then bg = c.bg t.setBackgroundColor(colors[bg] or colors.black) end
       end
       t.write(c.text)
     end

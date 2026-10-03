@@ -32,6 +32,14 @@ A shared dig (`mineBox`) is cut into one slice per turtle, nearest slice to each
 
 **Restarts.** Jobs survive server restarts and chunk unloads. Turtles save their progress after every block and carry on where they stopped when they start again; the computer picks the job back up with `fleet resume` (that is what its `startup.lua` runs) and collects results turtles finished while it was down. A turtle that goes silent (unloaded chunk, out of range) is waited for up to 10 minutes before it counts as lost. This needs the two `startup.lua` files and GPS on the turtles.
 
+## Dashboard
+A screen for the fleet, on the brain computer: `fleet dash` (or `shell.run("fleet dash")` in its `startup.lua` instead of `fleet resume`; it picks up a saved job by itself).
+
+- Put an **advanced monitor** next to the computer (a 4x3 or bigger works well; the dashboard sets text scale 0.5). It lists every turtle with its state (BUSY / idle / LOST), position, fuel and current step, and the recent events. Touch **[STOP ALL]**, **[HOME ALL]** or a busy turtle's **[stop]**. Without a monitor it uses the computer's own screen.
+- Type on the computer: plain text is a goal for the LLM, like `fleet <goal>`. Lines starting with `/` run at once with no LLM call: `/stop` (all turtles and the goal) or `/stop 3`, `/home` (stop everything, then all turtles go home) or `/home 3`, `/resume`, `/scale 1` (monitor text scale), `/clear`, `/help`.
+- Turtles are polled every 5 s, so the screen stays current between jobs. A turtle silent for 60 s shows as LOST.
+- Ctrl+T quits the dashboard only. The turtles keep working and the job is waited for again the next time `fleet dash` starts.
+
 ## Tests (dev machine)
 ```
 pip install lupa

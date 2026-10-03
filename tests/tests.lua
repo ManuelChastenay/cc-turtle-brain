@@ -1183,5 +1183,13 @@ test("fleet: a turtle silent for two minutes that comes back is waited for", fun
   eq(events[1], "silent")
 end)
 
+---------------------------------------------------------------- dashboard (bot/ui, bot/registry, bot/dash)
+local helpers = { fakeClient = fakeClient, fakeFleet = fakeFleet, quietly = quietly }
+for _, file in ipairs({ "ui_tests.lua", "registry_tests.lua", "dash_tests.lua" }) do
+  local path = SIM_DIR .. file
+  local f = io.open(path, "r")
+  if f then f:close() dofile(path)(test, eq, truthy, helpers) end
+end
+
 print(("passed %d, failed %d"):format(passed, failed))
 return failed > 0

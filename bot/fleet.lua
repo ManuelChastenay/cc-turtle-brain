@@ -134,7 +134,7 @@ function M.wait(run, turtles, onEvent)
           finish(from, msg)
         elseif msg.type == "progress" and msg.job == run.job then
           onEvent(from, msg)
-        elseif msg.type == "status" and msg.job ~= run.job then
+        elseif msg.type == "status" and not msg.quick and msg.job ~= run.job then
           -- <Claude> Done while we were not listening (its result is kept), or lost the job.
           local kept = type(msg.result) == "table" and msg.result.job == run.job and msg.result
           finish(from, kept or { ok = false, error = "turtle restarted without its job" })

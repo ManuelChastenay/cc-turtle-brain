@@ -1,14 +1,21 @@
 --[[ <Claude>
   Rednet protocol between the fleet brain (fleet.lua, on a computer) and
   turtles running worker.lua. Messages are tables with a `type`:
-    brain -> turtle  hello                     reply: status
+    brain -> turtle  hello { quick }           reply: status. quick = true skips the inventory
+                                               scan (16 game ticks on the turtle): the dashboard
+                                               polls with it every few seconds
                      plan { job, steps }       reply: accepted, then progress..., result
                                                (or at once: result with ok = false if busy/invalid)
                      ack { job }               the brain has the result: the turtle forgets it
                      stop                      the running plan stops where it is, reply: result
-    turtle -> brain  status { label, state, pos, job, result }   job = id of the running plan;
-                                               result = last result message, until acknowledged
-                     progress { job, step, text }
+    turtle -> brain  status { label, state, pos, fuel, job, step, steps, text, result, quick }
+                                               job = id of the running plan; step/steps/text =
+                                               the step it is on (only with a job); fuel = number
+                                               or "unlimited"; result = last result message, until
+                                               acknowledged. A quick status has no state or
+                                               result and quick = true (bot/fleet.lua ignores it
+                                               when deciding a job was lost)
+                     progress { job, step, steps, text }
                      result { job, ok, summary | error, failed, completed, state, pos }
   A rebooted worker resumes its job (same id), so a turtle that went silent
   can come back; the brain waits for it (bot/fleet.lua).
@@ -34,6 +41,10 @@ end
 
 function M.send(id, msg)
   rednet.send(id, msg, M.PROTOCOL)
+end
+
+function M.broadcast(msg)
+  rednet.broadcast(msg, M.PROTOCOL)
 end
 
 return M

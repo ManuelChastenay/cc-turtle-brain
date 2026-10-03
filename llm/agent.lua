@@ -42,7 +42,9 @@ local function runTool(tools, call)
 end
 
 -- <Claude> Returns finalText, stats  |  nil, errorString. onTool(name, result) is optional logging.
-function M.run(goal, tools, systemPrompt, onTool)
+-- stopped() is optional: checked before every LLM call, true ends the run with
+-- nil, "stopped" (the dashboard's stop button: no replanning after a stop).
+function M.run(goal, tools, systemPrompt, onTool, stopped)
   local messages = {
     { role = "system", content = systemPrompt },
     { role = "user",   content = goal },
@@ -50,6 +52,7 @@ function M.run(goal, tools, systemPrompt, onTool)
   local schema, stats = toSchema(tools), { turns = 0, tokensIn = 0, tokensOut = 0 }
 
   for turn = 1, config.maxTurns do
+    if stopped and stopped() then return nil, "stopped" end
     local msg, usage = client.chat(messages, schema)
     if not msg then return nil, usage end
     stats.turns = turn

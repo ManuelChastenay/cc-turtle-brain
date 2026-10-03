@@ -41,9 +41,19 @@ nav.onTurtleInWay = function(id)
 end
 
 -- <Claude> `result` is the last job's result until the brain acknowledges it.
-local function status()
-  return { type = "status", label = os.getComputerLabel(), state = skills.state(), pos = nav.pos(),
-           job = current and current.id, result = not current and jobs.result() or nil }
+-- A quick status (the dashboard's poll) leaves out `state` and `result`:
+-- state scans the inventory, which stalls the whole turtle for 16 ticks.
+local function status(quick)
+  local fuel = nav.fuel()
+  local msg = { type = "status", label = os.getComputerLabel(), pos = nav.pos(), job = current and current.id,
+                fuel = fuel == math.huge and "unlimited" or fuel }
+  if current then msg.step, msg.steps, msg.text = current.step, #current.steps, current.text end
+  if quick then
+    msg.quick = true
+  else
+    msg.state, msg.result = skills.state(), not current and jobs.result() or nil
+  end
+  return msg
 end
 
 -- <Claude> Runs the current job until it ends or a stop arrives; returns the result message.
@@ -51,8 +61,9 @@ local function runJob()
   local report
   parallel.waitForAny(function()
     report = plan.report(current.steps, plan.run(current.steps, function(i, step)
-      print(("[%d] %s"):format(i, plan.format(step)))
-      net.send(current.boss, { type = "progress", job = current.id, step = i, text = plan.format(step) })
+      current.step, current.text = i, plan.format(step)
+      print(("[%d] %s"):format(i, current.text))
+      net.send(current.boss, { type = "progress", job = current.id, step = i, steps = #current.steps, text = current.text })
     end, jobs.journal(current.record)))
   end, function()
     os.pullEvent("ccbrain_stop")
@@ -78,7 +89,7 @@ end
 
 local function handle(from, msg)
   if msg.type == "hello" then
-    net.send(from, status())
+    net.send(from, status(msg.quick))
   elseif msg.type == "plan" and current then
     net.send(from, { type = "result", job = msg.job, ok = false, error = "busy with job " .. tostring(current.id) })
   elseif msg.type == "plan" then

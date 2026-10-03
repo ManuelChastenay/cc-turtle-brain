@@ -43,6 +43,15 @@ end
 
 local goal = table.concat({ ... }, " ")
 if not net.open() then error("fleet needs a modem (wireless or ender)", 0) end
+
+-- <Claude> `fleet dash`: stay up as the dashboard (monitor + prompt, bot/dash.lua).
+-- Goals typed there run exactly like `fleet <goal>`; a job saved before a
+-- reboot is waited for again by itself.
+if goal == "dash" then
+  require("bot.dash").run({ system = SYSTEM, skills = skills.list })
+  return
+end
+
 local saved = fleet.loadRun()
 
 -- <Claude> `fleet resume` (e.g. from startup.lua): wait again for the job
