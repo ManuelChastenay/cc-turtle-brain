@@ -1,9 +1,11 @@
 --[[ <Claude>
-  Inventory helpers: free slots, a compact summary for the LLM, and
-  unloading into an adjacent chest (anything exposing an "inventory"
-  peripheral: chests, barrels, modded storage). Fuel items are kept.
+  Inventory helpers: free slots, a compact summary for the LLM, dropping
+  junk, and unloading into an adjacent chest (anything exposing an
+  "inventory" peripheral: chests, barrels, modded storage). Unloading keeps
+  up to config.keepFuel fuel items.
 ]]
 local nav = require("bot.nav")
+local config = require("bot.config")
 
 local M = {}
 
@@ -43,7 +45,30 @@ function M.summary()
   return text
 end
 
--- <Claude> Returns true, itemsMoved | false, err. Turns toward a chest on the
+-- <Claude> Drops junk (config.junk, exact item names) on the ground to free
+-- slots without a trip home; it despawns after 5 minutes. Uses a side with
+-- no inventory so nothing lands in a chest by mistake. Returns items dropped.
+function M.discardJunk()
+  local junk = {}
+  for _, name in ipairs(config.junk) do junk[name] = true end
+  local drop
+  for _, d in ipairs({ { "top", turtle.dropUp }, { "bottom", turtle.dropDown }, { "front", turtle.drop } }) do
+    if not peripheral.hasType(d[1], "inventory") then drop = d[2] break end
+  end
+  local dropped = 0
+  for slot = 1, drop and 16 or 0 do
+    local item = turtle.getItemDetail(slot)
+    if item and junk[item.name] then
+      turtle.select(slot)
+      if drop() then dropped = dropped + item.count end
+    end
+  end
+  turtle.select(1)
+  return dropped
+end
+
+-- <Claude> Returns true, itemsMoved | false, err. Keeps up to config.keepFuel
+-- fuel items, none if fuel is unlimited. Turns toward a chest on the
 -- left/right/back and turns back afterwards.
 function M.unload()
   local side = M.findChest()
@@ -54,12 +79,18 @@ function M.unload()
     nav.face((before + TURNS[side]) % 4)
   end
   local drop = side == "top" and turtle.dropUp or side == "bottom" and turtle.dropDown or turtle.drop
+  local keep = nav.fuel() == math.huge and 0 or config.keepFuel
   local moved, err = 0, nil
   for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
-    if item and not nav.isFuel(item.name) then
+    local count = item and item.count or 0
+    if item and nav.isFuel(item.name) then
+      local kept = math.min(keep, count)
+      keep, count = keep - kept, count - kept
+    end
+    if count > 0 then
       turtle.select(slot)
-      if not drop() then err = "chest is full" break end
+      if not drop(count) then err = "chest is full" break end
       moved = moved + item.count - turtle.getItemCount(slot)
     end
   end

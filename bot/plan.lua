@@ -145,11 +145,20 @@ end
 
 -- <Claude> Runs checked steps in order, stopping at the first failure.
 -- Returns ok, stepsRun, results. onStep(i, step) is called before each step.
-function M.run(steps, onStep)
-  local results = {}
-  for i, step in ipairs(steps) do
+-- Skills get ctx = { state, save(state) }: state is the checkpoint they
+-- saved before a reboot (nil on a fresh start). Saving only lasts with a
+-- journal (bot/job.lua), which also says where to resume: { step, state,
+-- results, begin(i), checkpoint(i, state), finish(i, result) }.
+function M.run(steps, onStep, journal)
+  local results = journal and journal.results or {}
+  local first = journal and journal.step or 1
+  for i = first, #steps do
+    local step = steps[i]
     if onStep then onStep(i, step) end
-    local ok, result = pcall(step.skill.run, step.args)
+    local state = journal and i == first and journal.state or nil
+    if journal and state == nil then journal.begin(i) end
+    local ctx = { state = state, save = function(s) if journal then journal.checkpoint(i, s) end end }
+    local ok, result = pcall(step.skill.run, step.args, ctx)
     if not ok then
       if result == "Terminated" then error(result, 0) end
       result = { ok = false, error = tostring(result) }
@@ -157,6 +166,7 @@ function M.run(steps, onStep)
       result = { ok = false, error = "skill returned no result" }
     end
     results[i] = result
+    if journal then journal.finish(i, result) end
     if not result.ok then return false, i, results end
   end
   return true, #steps, results

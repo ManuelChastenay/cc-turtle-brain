@@ -6,8 +6,8 @@
   turtle walks the middle one and digs up and down, so a 3-deep area costs
   one pass of fuel. Every move stays inside the box, except the first step
   in "down" mode (the block above the box, in front of the turtle).
-  When the inventory fills, it unloads into a chest next to the start or at
-  home, then resumes.
+  When the inventory fills, it drops junk (bot/config.lua); if that is not
+  enough, it unloads into a chest next to the start or at home, then resumes.
 ]]
 local nav = require("bot.nav")
 local inv = require("bot.inv")
@@ -47,7 +47,8 @@ local function visits(length, rows, layers)
 end
 
 -- <Claude> Cells to visit, the door (box cell the turtle enters and leaves
--- through) and the number of moves, all in the local frame.
+-- through), the number of moves and the box bounds ({ min, max } per axis),
+-- all in the local frame.
 -- args: length, width, layers, vertical ("down"|"up"), side ("right"|"left"|"center").
 local function layout(args)
   local rows, first = {}, ({ right = 0, left = 0, center = -math.floor((args.width - 1) / 2) })[args.side]
@@ -58,25 +59,36 @@ local function layout(args)
   local door = { a = 1, r = 0, l = entry }
   local moves = dist(ORIGIN, door) * 2 + dist(door, list[1]) + dist(list[#list], door)
   for i = 2, #list do moves = moves + dist(list[i - 1], list[i]) end
-  return list, door, moves
+  local box = {
+    a = { 1, args.length },
+    r = { math.min(rows[1], rows[#rows]), math.max(rows[1], rows[#rows]) },
+    l = { math.min(layers[1], layers[#layers]), math.max(layers[1], layers[#layers]) },
+  }
+  return list, door, moves, box
 end
 
 local function fuelError(need)
   return { ok = false, error = ("needs about %d fuel, has %d: put coal in the turtle"):format(need, nav.fuel()) }
 end
 
--- <Claude> Digs the box toward heading h from where the turtle stands.
-local function dig(h, args)
+-- <Claude> Digs the box toward heading h from where the turtle stands or,
+-- given a checkpoint in ctx.state, carries on after a reboot. Saves one
+-- before starting and after every cell: { h, args, origin, startHeading,
+-- next, mined, trips, junked }.
+local function dig(h, args, ctx)
+  local saved = ctx and ctx.state
   local startHeading, origin = nav.heading(), nav.pos()
-  if not startHeading then return { ok = false, error = "heading unknown (no GPS fix to calibrate it)" } end
+  if saved then h, args, startHeading, origin = saved.h, saved.args, saved.startHeading, saved.origin end
+  if not nav.heading() then return { ok = false, error = "heading unknown (no GPS fix to calibrate it)" } end
+  local shape = { length = args.length, width = args.width, layers = args.layers, vertical = args.vertical, side = args.side }
 
   local fx, fz = nav.vector(h)
   local rx, rz = nav.vector((h + 1) % 4)
   local axes = { a = fx ~= 0 and "x" or "z", r = rx ~= 0 and "x" or "z", l = "y" }
 
-  local list, door, moves = layout(args)
+  local list, door, _, box = layout(shape)
+  local first = saved and saved.next or 1
   local function exitCost(c) return dist(c, door) + dist(door, ORIGIN) end
-  if not nav.refuel(moves + config.fuelMargin) then return fuelError(moves + config.fuelMargin) end
 
   local function go(c, order)
     local target = { x = origin.x + c.a * fx + c.r * rx, y = origin.y + c.l, z = origin.z + c.a * fz + c.r * rz }
@@ -96,7 +108,38 @@ local function dig(h, args)
     go(ORIGIN, "la")
   end
 
-  local dug0, trips, outside = nav.dug, 0, false
+  local need, last = config.fuelMargin, here()
+  for k = first, #list do need, last = need + dist(last, list[k]), list[k] end
+  need = need + exitCost(last)
+  if not nav.refuel(need) then return fuelError(need) end
+
+  local mined0, dug0 = saved and saved.mined or 0, nav.dug
+  local trips, junked, outside = saved and saved.trips or 0, saved and saved.junked or 0, false
+  local function mined() return mined0 + nav.dug - dug0 end
+  local function checkpoint(next)
+    if ctx and ctx.save then
+      ctx.save({ h = h, args = shape, origin = origin, startHeading = startHeading, next = next,
+                 mined = mined(), trips = trips, junked = junked })
+    end
+  end
+  if not saved then checkpoint(1) end
+
+  -- <Claude> After a reboot the turtle can be anywhere on its route: in the
+  -- box, one block beside it (it was giving way), on the approach, or on a
+  -- trip home. Get back onto the route first.
+  local function rejoin()
+    local c = here()
+    local function within(v, range) return v >= range[1] and v <= range[2] end
+    if within(c.a, box.a) and within(c.r, box.r) and within(c.l, box.l) then return end
+    if c.r == 0 and c.l == 0 and (c.a == 0 or c.a == 1) then return end
+    local function clamp(v, range) return math.max(range[1], math.min(range[2], v)) end
+    local near = { a = clamp(c.a, box.a), r = clamp(c.r, box.r), l = clamp(c.l, box.l) }
+    if dist(c, near) == 1 then return go(near, "lra") end
+    outside = true
+    check(nav.goTo(origin))
+    outside = false
+  end
+
   local function unloadTrip()
     leave()
     trips = trips + 1
@@ -119,9 +162,14 @@ local function dig(h, args)
   end
 
   local ok, failure = pcall(function()
-    for _, v in ipairs(list) do
+    if saved then rejoin() end
+    for idx = first, #list do
+      local v = list[idx]
       -- <Claude> A cell digs up to 3 blocks, each possibly a new item type.
-      if inv.freeSlots() < 1 + (v.up and 1 or 0) + (v.down and 1 or 0) then unloadTrip() end
+      -- Dropping junk usually frees enough room to skip the trip home.
+      local room = 1 + (v.up and 1 or 0) + (v.down and 1 or 0)
+      if inv.freeSlots() < room then junked = junked + inv.discardJunk() end
+      if inv.freeSlots() < room then unloadTrip() end
       local atStart = dist(here(), ORIGIN) == 0
       local cost = (atStart and exitCost(v) or dist(here(), v)) + exitCost(v) -- get there and back
       if nav.fuel() < cost and not nav.refuel(cost + config.fuelMargin) then
@@ -133,8 +181,9 @@ local function dig(h, args)
       else
         go(v, "lra")
       end
-      if v.up then check(nav.dig("up")) end
-      if v.down then check(nav.dig("down")) end
+      if v.up then check(nav.clear("up")) end
+      if v.down then check(nav.clear("down")) end
+      checkpoint(idx + 1)
     end
     leave()
   end)
@@ -147,23 +196,25 @@ local function dig(h, args)
     end
     nav.face(startHeading)
     local p = nav.pos()
-    return { ok = false, error = failure, mined = nav.dug - dug0, at = ("%d,%d,%d"):format(p.x, p.y, p.z) }
+    return { ok = false, error = failure, mined = mined(), at = ("%d,%d,%d"):format(p.x, p.y, p.z) }
   end
   nav.face(startHeading)
-  return { ok = true, mined = nav.dug - dug0, trips = trips }
+  return { ok = true, mined = mined(), trips = trips, junked = junked }
 end
 
 -- <Claude> args: direction plus the layout() args. Box relative to the turtle.
-function M.mineArea(args)
+function M.mineArea(args, ctx)
+  if ctx and ctx.state then return dig(nil, nil, ctx) end -- resuming: direction and layout are saved
   local h, err = nav.resolve(args.direction)
   if not h then return { ok = false, error = err } end
-  return dig(h, args)
+  return dig(h, args, ctx)
 end
 
 -- <Claude> args: x1, y1, z1, x2, y2, z2 (opposite corners, any order).
 -- Enters from just above the box at its top corner nearest the turtle, digs
 -- top-down with rows along the longer side, and ends at that entry point.
-function M.mineBox(a)
+function M.mineBox(a, ctx)
+  if ctx and ctx.state then return dig(nil, nil, ctx) end -- resuming: corner and layout are saved
   local lo = { x = math.min(a.x1, a.x2), y = math.min(a.y1, a.y2), z = math.min(a.z1, a.z2) }
   local hi = { x = math.max(a.x1, a.x2), y = math.max(a.y1, a.y2), z = math.max(a.z1, a.z2) }
   local p = nav.pos()
@@ -186,7 +237,7 @@ function M.mineBox(a)
   if not nav.refuel(need) then return fuelError(need) end
   local ok, err = nav.goTo(entry)
   if not ok then return { ok = false, error = "could not reach the box: " .. err } end
-  return dig(h, args)
+  return dig(h, args, ctx)
 end
 
 return M

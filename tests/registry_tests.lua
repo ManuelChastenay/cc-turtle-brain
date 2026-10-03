@@ -1,0 +1,97 @@
+--[[ <Claude>
+  Tests for bot/registry.lua (what the dashboard knows about the fleet).
+  Loaded by tests/tests.lua: dofile(SIM_DIR .. "registry_tests.lua")(test, eq, truthy)
+]]
+return function(test, eq, truthy)
+  local registry = require("bot.registry")
+  local function new() return registry.new({ stamp = function(now) return ("t%03d"):format(now) end }) end
+  local POS = { x = 1, y = 64, z = 2 }
+
+  test("registry: a status makes a record and logs the join once", function()
+    local reg = new()
+    truthy(reg.apply(7, { type = "status", label = "miner-1", state = "pos 1,64,2", pos = POS, fuel = 500 }, 10))
+    reg.apply(7, { type = "status", label = "miner-1", state = "pos 1,64,2", pos = POS, fuel = 480 }, 15)
+    local rec = reg.turtles[7]
+    eq(rec.label, "miner-1") eq(rec.state, "pos 1,64,2") eq(rec.fuel, 480) eq(rec.seen, 15)
+    eq(reg.mode(rec, 16), "idle")
+    eq(#reg.log, 1) eq(reg.log[1], "t010 #7 miner-1 joined")
+  end)
+
+  test("registry: busy while a job runs, with the current step", function()
+    local reg = new()
+    reg.apply(3, { type = "status", label = "a", state = "s", job = "j1", step = 2, steps = 4, text = "mineBox x" }, 5)
+    local rec = reg.turtles[3]
+    eq(reg.mode(rec, 6), "busy")
+    eq(rec.step, 2) eq(rec.steps, 4) eq(rec.text, "mineBox x")
+    reg.apply(3, { type = "progress", job = "j1", step = 3, steps = 4, text = "goHome" }, 8)
+    eq(rec.step, 3) eq(rec.text, "goHome")
+    eq(reg.log[#reg.log], "t008 #3 [3] goHome")
+  end)
+
+  test("registry: a progress without a total keeps the one already known", function()
+    local reg = new()
+    reg.apply(3, { type = "status", job = "j", step = 1, steps = 4, text = "x" }, 1)
+    reg.apply(3, { type = "progress", job = "j", step = 2, text = "y" }, 2)
+    eq(reg.turtles[3].steps, 4)
+  end)
+
+  test("registry: results end the job and keep the outcome for the screen", function()
+    local reg = new()
+    reg.apply(3, { type = "accepted", job = "j1" }, 1)
+    eq(reg.mode(reg.turtles[3], 2), "busy")
+    reg.apply(3, { type = "result", job = "j1", ok = true, summary = "Done", state = "pos 9,9,9", pos = POS }, 20)
+    local rec = reg.turtles[3]
+    eq(reg.mode(rec, 21), "idle") eq(rec.job, nil) eq(rec.text, "finished") eq(rec.state, "pos 9,9,9")
+    eq(reg.log[#reg.log], "t020 #3 finished")
+    reg.apply(3, { type = "accepted", job = "j2" }, 30)
+    reg.apply(3, { type = "result", job = "j2", ok = false, error = ("e"):rep(100) }, 40)
+    eq(rec.text:sub(1, 8), "failed: ")
+    truthy(#reg.log[#reg.log] <= 4 + 1 + 3 + 70 + 2, "long errors are cut in the log: " .. #reg.log[#reg.log])
+  end)
+
+  test("registry: silent turtles show as lost, and come back on any message", function()
+    local reg = new()
+    reg.apply(4, { type = "status", label = "b", state = "s" }, 100)
+    eq(reg.mode(reg.turtles[4], 100 + registry.LOST_AFTER), "idle")
+    eq(reg.mode(reg.turtles[4], 100 + registry.LOST_AFTER + 1), "lost")
+    reg.apply(4, { type = "status", label = "b", state = "s" }, 200)
+    eq(reg.mode(reg.turtles[4], 201), "idle")
+  end)
+
+  test("registry: junk messages change nothing", function()
+    local reg = new()
+    eq(reg.apply(5, "hello", 1), false)
+    eq(reg.apply("5", { type = "status" }, 1), false)
+    eq(reg.apply(5, { type = "hello" }, 1), false)
+    eq(reg.apply(5, { type = "makeway", from = POS }, 1), false)
+    eq(next(reg.turtles), nil) eq(#reg.log, 0)
+  end)
+
+  test("registry: view lists turtles by id with their mode, merged with the extras", function()
+    local reg = new()
+    reg.apply(9, { type = "status", label = "z", state = "s", pos = POS, fuel = 10 }, 50)
+    reg.apply(2, { type = "status", label = "a", state = "s", job = "j", step = 1, steps = 2, text = "t" }, 10)
+    local view = reg.view(100, { llm = "thinking", calls = 3, goal = "g" })
+    eq(view.llm, "thinking") eq(view.calls, 3) eq(view.goal, "g")
+    eq(#view.turtles, 2)
+    eq(view.turtles[1].id, 2) eq(view.turtles[1].state, "lost") eq(view.turtles[1].silent, 90)
+    eq(view.turtles[2].id, 9) eq(view.turtles[2].state, "idle") eq(view.turtles[2].fuel, 10)
+    eq(view.log, reg.log)
+  end)
+
+  test("registry: the log keeps only the newest LOG_MAX lines", function()
+    local reg = new()
+    for i = 1, registry.LOG_MAX + 25 do reg.note("line " .. i, i) end
+    eq(#reg.log, registry.LOG_MAX)
+    truthy(reg.log[#reg.log]:find("line " .. (registry.LOG_MAX + 25), 1, true))
+    truthy(reg.log[1]:find("line 26", 1, true))
+  end)
+
+  test("registry: records keep the roster shape bot/fleet.lua reads (label, state, pos, job)", function()
+    local reg = new()
+    reg.apply(7, { type = "status", label = "m", state = "pos 1,64,2; fuel 9", pos = POS }, 1)
+    local fleet = require("bot.fleet")
+    local text = fleet.describe(reg.turtles)
+    truthy(text:find("#7 m: pos 1,64,2; fuel 9", 1, true), text)
+  end)
+end

@@ -9,6 +9,7 @@ A cheap LLM (via OpenRouter) plans; deterministic Lua executes.
 - LLM access is API-based through OpenRouter (OpenAI-compatible endpoint). Subscription-based access was ruled out (would need an external bridge).
 - Single player/user; designed for one turtle now, a fleet later.
 - GPS works on the user's turtle (wireless modem + GPS hosts).
+- Fuel can be turned off server-wide with `need_fuel = false` under `[turtle]` in `computercraft-server.toml`. Turtles then report `"unlimited"` and the code skips all fuel logic (tested). Not set as of 2026-10-03.
 
 ## Design: plan once, execute in Lua
 - One LLM call per goal: the model sends the whole job as a plan (an ordered list of skill steps) through the single `runPlan` tool. Lua runs every step with no LLM call in between.
@@ -16,31 +17,34 @@ A cheap LLM (via OpenRouter) plans; deterministic Lua executes.
 - A successful plan ends the run with a Lua-written summary (no "done" round trip).
 - Status (position, facing, home, fuel, inventory, adjacent chest) goes in the first user message, so the model never spends calls on status tools.
 - Not free-form Lua from the LLM: plans are data, so they are validated before anything moves, cost few output tokens, can't break the world outside skill rules, and can be split across turtles and sent over rednet.
-- Fleet: same flow on a computer (`fleet`). The LLM sends `runPlans`: groups of turtle ids, each with steps. Lua splits shared steps (a skill's `split`, e.g. `mineBox` slices) inside a group, sends every turtle its steps, and waits for all of them. Only then, if any failed, the LLM is called again with every turtle's outcome and fresh state. Waiting for all keeps the blocking `http.post` away from moments when rednet messages are expected.
+- Fleet: same flow on a computer (`fleet`). The LLM sends `runPlans`: groups of turtle ids, each with steps. Lua splits shared steps (a skill's `split`, e.g. `mineBox` slices) inside a group, sends every turtle its steps, and waits for all of them. Only then, if any failed, the LLM is called again with every turtle's outcome and fresh state.
+- Jobs survive reboots (server restart, chunk unload): turtles save their job and checkpoints to disk and carry on from the last one; the brain saves the job in flight and `fleet resume` waits for it again. See "Resume" below.
 
 ## Files
 - `install.lua`: downloads/updates all files from GitHub. Public repo uses raw URLs; private repo uses the GitHub API with a token in `/.github_token`. Add new files to its `FILES` list. It fetches itself first and, if changed, re-runs the new copy (`--updated`), so new `FILES` entries arrive in one run. Installers older than that (pre-2026-10-03) need `install` twice. Raw URLs can serve stale files for ~5 min after a push.
 - `brain.lua`: single-turtle entry point (`brain <goal>`). System prompt, state line, `runPlan` wiring.
-- `fleet.lua`: fleet entry point on a computer with a modem (`fleet <goal>`). Fleet system prompt, discovery, `runPlans` wiring. Ctrl+T stops the busy turtles.
-- `worker.lua`: run on each fleet turtle (or from `startup.lua`). Two coroutines: one runs plans, one answers the brain (status, busy, stop).
+- `fleet.lua`: fleet entry point on a computer with a modem (`fleet <goal>`, or `fleet resume` after a reboot, e.g. from `startup.lua`). Fleet system prompt, discovery, `runPlans` wiring. Ctrl+T stops the busy turtles.
+- `worker.lua`: run on each fleet turtle from `startup.lua`. Two coroutines: one runs plans, one answers the brain (status, busy, stop, ack) and other turtles (`makeway`: moves aside only when idle). Saves each job with `bot/job.lua` and resumes it at boot. Sets `nav.onTurtleInWay` to send `makeway` to a blocking turtle.
 - `llm/config.lua`: endpoint, model slug, key path, `maxTurns` (LLM calls per goal), `maxRetries`, `debugPath`.
 - `llm/openrouter.lua`: HTTP client. `chat(messages, tools) -> message, usage | nil, err`. Retries on network errors, 429 and 5xx. Sends `provider.require_parameters = true` with tools. Writes the last raw response to `debugPath` (`/llm_last.json`) — first thing to read when a run misbehaves.
 - `llm/agent.lua`: provider-agnostic tool-calling loop. `run(goal, tools, systemPrompt, onTool) -> text, stats | nil, err`. Calls in one turn run in order and stop at the first failure; a successful `final` tool ends the run.
-- `bot/config.lua`: turtle-side settings (state file, fuel items, protected blocks, fuel margin, max plan length).
-- `bot/nav.lua`: position/heading (dead reckoning saved to `/nav_state.json` after every move; GPS fix + heading calibration by stepping once at `init()`), `step`/`dig`/`goTo` that dig through obstacles except protected blocks, fuel and refuel. Another turtle in the way: waits (`turtleWaits` random ~1 s retries), never digs it.
-- `bot/inv.lua`: free slots, inventory summary, unload into an adjacent inventory peripheral (keeps fuel).
-- `bot/mine.lua`: `mineArea` (box relative to the turtle) and `mineBox` (box between two world corners; enters from above its nearest top corner, ends there). Walks the middle of each 3-layer group digging up/down (1 move per 3 blocks), stays inside the box, unloads at a chest next to the start or at home when full, returns to its start point on success or failure.
+- `bot/config.lua`: turtle-side settings (state file, fuel items, fuel kept when unloading, junk list, protected blocks, fuel margin, max plan length). Lists are substrings except `junk`, which uses exact names (a substring would catch Create's `andesite_alloy`).
+- `bot/nav.lua`: position/heading (dead reckoning saved to `/nav_state.json` after every move and turn; GPS fix + heading calibration by stepping once at `init()`, see "Resume"), `step`/`dig`/`goTo` that dig through obstacles except protected blocks, fuel and refuel. Another turtle in the way is never dug. `step` waits; every 3rd try the turtle with the higher computer id (read with `peripheral.call(side, "getID")`, a coin flip if unreadable) steps off the line, preferring a free cell over digging one. It waits there, then comes back to the same cell and facing, and `onTurtleInWay(id)` fires. It gives up after `turtleWaits` tries. `clear` (used for mining's up/down digs) only waits. `makeWay(from)` steps an idle turtle off the line.
+- `bot/inv.lua`: free slots, inventory summary, `discardJunk` (drops `config.junk` on a side with no inventory), and unload into an adjacent inventory peripheral (keeps up to `keepFuel` fuel items, none with unlimited fuel).
+- `bot/mine.lua`: `mineArea` (box relative to the turtle) and `mineBox` (box between two world corners; enters from above its nearest top corner, ends there). Walks the middle of each 3-layer group digging up/down (1 move per 3 blocks), stays inside the box, returns to its start point on success or failure. When full it drops junk first and only then unloads, at a chest next to the start or at home. In a simulated 4x50x50 slice of mixed ground, junk dropping took trips home from 17 to 0 and fuel from 6.5k to 3.5k.
 - `bot/skills.lua`: the skill list the planner sees, plus `state()` (the status line). Requires nav/inv/mine lazily so a computer can load it for the catalog and `split` functions.
-- `bot/plan.lua`: builds the prompt catalog, the step JSON schema and arg checks from skill declarations; validates, runs and reports plans.
+- `bot/plan.lua`: builds the prompt catalog, the step JSON schema and arg checks from skill declarations; validates, runs and reports plans. `run(steps, onStep, journal)`: with a journal it starts from the saved step and hands each skill `ctx = { state, save }`.
+- `bot/job.lua`: the worker's job on disk: `/job.json` (steps, current step, its checkpoint, results so far) and `/job_result.json` (last result, kept until the brain sends `ack`).
 - `bot/net.lua`: rednet protocol (`ccbrain`) and message types; `open()` opens every modem.
-- `bot/fleet.lua`: brain side: `discover`, `describe`, and the `runPlans` tool (expand groups, dispatch, wait with pings; silent for 60 s = lost; a turtle that answers with another job = restarted).
-- `tests/`: fake CC world (`fakecc.lua`: turtle, events, `parallel`, rednet, virtual time) and tests (`tests.lua`) run with `python tests/run.py` (needs `pip install lupa`). The fleet is tested one side at a time (real worker vs scripted brain, real brain vs scripted turtles). Not installed on turtles.
+- `bot/fleet.lua`: brain side: `discover`, `describe`, `wait`, `outcome`, `loadRun`/`clearRun`, and the `runPlans` tool. Saves the job in flight to `/fleet_job.json` before sending plans. Waits with pings every 15 s: silent 60 s = "silent" warning, 600 s = lost. A status carrying a kept result for the job counts as its result; one with neither the job nor its result = restarted without it. Every result is acked.
+- `tests/`: fake CC world (`fakecc.lua`: turtles, events, `parallel`, rednet, virtual time) and tests (`tests.lua`) run with `python tests/run.py` (needs `pip install lupa`). `sim.spawn(id, ...)` adds a second turtle with its own APIs and module copies (`t.require`), so two real `nav`s can meet in one world. The rednet side of the fleet is tested one side at a time (real worker vs scripted brain, real brain vs scripted turtles). Reboots: `sim.terminateAtAction` (after any turtle action) or `sim.onMove` raise "Terminated", `sim.reboot()` clears modules and events but keeps files and the world. Not installed on turtles.
 
 ## Conventions
 - Comment blocks include a `<Claude>` tag.
 - Secrets never go in the repo: `/.openrouter_key`, `/.github_token` are created by hand on each machine.
 - LLM tools are injected as `{ name = { description, parameters (JSON schema), handler(args) -> table, final? } }`. Each entry point has one: `runPlan` (brain) or `runPlans` (fleet).
 - Skills are declared once in `bot/skills.lua` as `{ name, doc, args = { { argName, type, default } }, run(args) -> table, split? }`. Types: `int`, `count` (>= 1), `str`, enum `a|b|c` (`dir` = 8 horizontal directions). Arg names shared between skills must have compatible types (the schema merges them). Keep `doc` short: it is sent on every call. `split(args, positions)` (optional) runs on the brain and returns args per turtle (nil = that turtle skips the step); it must not touch the turtle API.
+- Skills must survive a reboot mid-step: `run(args, ctx)` may run again from the start of the step with `ctx.state` = whatever it last passed to `ctx.save` (nil on a fresh start). Either be safe to repeat (goTo, goHome, unload) or save enough first: `move`/`face` save their resolved target before acting, `mineArea`/`mineBox` checkpoint after every cell.
 - Results are compact tables with an `ok` field; errors are returned (`{ ok = false, error = ... }`), never thrown out of the loop. Exception: `"Terminated"` (Ctrl+T) is always re-raised past every `pcall`.
 - `bot/nav` functions return `ok, err` and never throw; skills turn failures into results.
 - Use `textutils.json_null` where the API needs a real JSON `null`.
@@ -48,22 +52,34 @@ A cheap LLM (via OpenRouter) plans; deterministic Lua executes.
 - Lua must run on CC's Cobalt VM (Lua 5.2): no `//`, no bitwise operators, no `goto`.
 - Turtles must be labeled (`label set ...`) or they lose files when broken.
 
+## Resume (reboots, chunk unloads, server restarts)
+- Needs `startup.lua` on every turtle (`shell.run("worker")`) and on the brain computer (`shell.run("fleet resume")`), and GPS on the turtles to be exact.
+- Worker: a job is saved when accepted; plan.run journals each step; mining checkpoints after every cell (direction, layout, origin, start heading, next cell, counters). After a reboot `mineArea`/`mineBox` first rejoin their route (inside the box, beside it, on the approach, or anywhere on a trip home), then go on. Results are kept until acked.
+- Nav markers in `/nav_state.json` make every reboot point recoverable: `turning` (set during a turn: the saved heading may be one turn off) and `calibrating` (`{ pos, heading }` from before a calibration, kept until the turtle is back there). `init(trustSaved)`: when resuming a job and the saved state is consistent (GPS within 1 block of the saved spot, no marker), no calibration moves at all. Otherwise it calibrates: horizontally where it stands, else one block up or down, else (resuming only) by digging one block. A cut-off calibration is undone (same level first, then back to the spot and facing). If the heading still can't be known, it stays unknown and moves fail instead of guessing.
+- Stress-tested in the sim: 1,000+ random jobs, ~13,000 reboots at random actions. Every box ended fully dug, nothing else dug and the turtle in the right place and facing, except ~4% of the jobs where a reboot right after a turn caught the turtle boxed in: one extra block dug (the last-resort calibration). The sim reboots right after turns far more often than a real server would.
+
 ## Known limitations
-- `http.post` is blocking and swallows other events (e.g. rednet) while waiting. Harmless today because the fleet brain only calls the LLM when every turtle is idle; move to async `http.request` + `parallel` before the brain does anything while turtles work (dashboards, replanning one turtle while others run).
+- `http.post` blocks only the coroutine that calls it; under `parallel`, other coroutines keep getting every event. The fleet brain calls the LLM and waits for rednet in one coroutine, so it only calls the LLM when every turtle is idle. Two LLM calls in flight at once would need unique request keys (`http_success` matches by URL only).
 - Fleet replans only once every turtle has finished: a turtle that fails early idles until the slowest one is done.
-- Two turtles meeting head-on both wait ~20 s, then fail (replan). No traffic lanes or reservation.
-- Fleet turtles must stay in loaded chunks and in modem range (wireless ~64 blocks; ender modems have no limit). Otherwise they freeze and the brain reports them lost after 60 s.
+- Turtle meetings are resolved locally (right of way by id, step aside, makeway), with no lanes or reservations. Known failure: the yielding turtle's side cell is exactly where the other turtle's path turns next; the yielder then can't get back and its step fails after `turtleWaits`. Jams of 3+ turtles are untested. A turtle that never moves (not a worker, or busy and stuck) makes the others give up after ~20 s.
+- Untested in-game: whether a turtle can read an adjacent turtle's id via `peripheral.call(side, "getID")`. If not, the coin flip takes over (slower, still tested).
+- Fleet turtles must stay in modem range (wireless ~64 blocks; ender modems have no limit). A turtle in an unloaded chunk is frozen; it resumes when the chunk loads again, and the brain waits up to 10 minutes for it.
 - A stop abandons the running command; the worker resyncs with `nav.init()`, which needs GPS to be exact.
 - Rednet is not authenticated: anyone on the server could send plans to the workers.
 - Plans are open-loop: no step can feed an observation back to the model except by failing.
+- Dropped junk becomes item entities (despawn after 5 min). Tens of turtles keep a few hundred alive near the dig at once. The junk list is config-only; the LLM can't say "keep the stone" per job.
+- Ores stay in the turtle at the end of a dig unless the plan ends with `goHome` + `unload`.
+- `brain` (single turtle) does not resume after a reboot; only `worker` jobs do. `mined` counts can be a little low after reboots (digs after the last checkpoint are not counted again).
+- No fuel pickup: turtles only burn fuel they carry or dig up (or set `need_fuel = false`).
 - `goTo` walks axis by axis and digs through whatever is in the way (protected blocks excepted); no pathfinding around obstacles.
-- `init()` steps the turtle 1 block and back on every run when GPS is available (heading calibration, 2 fuel).
+- `init()` steps the turtle 1 block and back on every start when GPS is available (heading calibration, 2 fuel), except a worker resuming a job with a consistent saved state.
 - Without GPS, coordinates are relative to the first run and "north" is the turtle's first facing.
-- The test world is a simplified CC. In-game: single-turtle `brain` + `mineArea` confirmed working (2026-10-03); `mineBox`, `worker` and `fleet` not yet.
+- The test world is a simplified CC. In-game: single-turtle `brain` + `mineArea` confirmed working (2026-10-03); `mineBox`, `worker`, `fleet` and resume not yet.
 - Model choice: `deepseek/deepseek-chat` (DeepSeek V3, 2 providers) ran without error but came back empty with no tool call (2026-10-03). Switched to `deepseek/deepseek-v4-flash` (15 providers, all with tool support). Check a slug's providers at `https://openrouter.ai/api/v1/models/<slug>/endpoints` before switching.
 
 ## Next steps
-1. In-game test of `worker` + `fleet` with 2 turtles (shared `mineBox`, then `goHome`).
-2. More skills (place/build, farm, item transfer), each with a `split` when it can be shared.
-3. Async HTTP in the brain, then per-turtle replanning while others keep working, monitor dashboards.
-4. Later: storage management via wired modems, blueprint-based building.
+1. In-game test of `worker` + `fleet`, scaling up: 2 turtles on 10x10x10, then 5 on 30x30x20.
+2. For big digs (order agreed 2026-10-03; coal fix, junk dropping and resume done): fuel pickup at home (moot if `need_fuel = false`), then per-turtle replanning.
+3. Fleet dashboard (monitor + terminal commands): planned in another session, building on the `status`/`ack` protocol.
+4. More skills (place/build, farm, item transfer), each with a `split` when it can be shared.
+5. Later: storage management via wired modems, blueprint-based building.

@@ -1,10 +1,13 @@
 --[[ <Claude>
   Skills the planner can put in a plan. Each is declared once:
-    { name, doc, args = { { argName, type, default } }, run = function(args) -> result,
+    { name, doc, args = { { argName, type, default } }, run = function(args, ctx) -> result,
       split = function(args, positions) -> argsPerTurtle }   -- optional, fleet only
   An arg with a default is optional; types are listed in bot/plan.lua.
   run returns { ok = true, ... } or { ok = false, error = "..." }; extra
-  scalar fields show up in the run summary. split divides one step between
+  scalar fields show up in the run summary. A worker can reboot in the
+  middle of a step and run it again: ctx.state is what the step last passed
+  to ctx.save (nil on a fresh start), so a step must either be safe to
+  repeat or save enough to carry on. split divides one step between
   the turtles of a fleet group (see bot/fleet.lua). Keep docs short: they
   are sent with every LLM call.
 ]]
@@ -65,14 +68,14 @@ M.list = {
       { "direction", "dir" }, { "length", "count" }, { "width", "count" }, { "layers", "count" },
       { "vertical", "down|up", "down" }, { "side", "right|left|center", "right" },
     },
-    run = function(a) return mine.mineArea(a) end,
+    run = function(a, ctx) return mine.mineArea(a, ctx) end,
   },
   {
     name = "mineBox",
     doc = "Dig out the box between two corners (world coordinates, all blocks included)."
       .. " Enters from above its nearest top corner and ends there.",
     args = { { "x1", "int" }, { "y1", "int" }, { "z1", "int" }, { "x2", "int" }, { "y2", "int" }, { "z2", "int" } },
-    run = function(a) return mine.mineBox(a) end,
+    run = function(a, ctx) return mine.mineBox(a, ctx) end,
     split = splitBox,
   },
   {
@@ -85,15 +88,21 @@ M.list = {
     name = "move",
     doc = "Travel some blocks in a direction.",
     args = { { "direction", "dir|up|down" }, { "blocks", "count", 1 } },
-    run = function(a)
-      local target = nav.pos()
-      if a.direction == "up" or a.direction == "down" then
-        target.y = target.y + (a.direction == "up" and a.blocks or -a.blocks)
-      else
-        local h, err = nav.resolve(a.direction)
-        if not h then return fail(err) end
-        local dx, dz = nav.vector(h)
-        target.x, target.z = target.x + dx * a.blocks, target.z + dz * a.blocks
+    -- <Claude> The target is saved first: after a reboot, "3 blocks left"
+    -- must not be counted again from wherever the turtle stopped.
+    run = function(a, ctx)
+      local target = ctx.state and ctx.state.target
+      if not target then
+        target = nav.pos()
+        if a.direction == "up" or a.direction == "down" then
+          target.y = target.y + (a.direction == "up" and a.blocks or -a.blocks)
+        else
+          local h, err = nav.resolve(a.direction)
+          if not h then return fail(err) end
+          local dx, dz = nav.vector(h)
+          target.x, target.z = target.x + dx * a.blocks, target.z + dz * a.blocks
+        end
+        ctx.save({ target = target })
       end
       return travel(target)
     end,
@@ -102,9 +111,14 @@ M.list = {
     name = "face",
     doc = "Turn toward a direction.",
     args = { { "direction", "dir" } },
-    run = function(a)
-      local h, err = nav.resolve(a.direction)
-      if not h then return fail(err) end
+    run = function(a, ctx)
+      local h = ctx.state and ctx.state.h
+      if not h then
+        local err
+        h, err = nav.resolve(a.direction)
+        if not h then return fail(err) end
+        ctx.save({ h = h })
+      end
       local ok, turnErr = nav.face(h)
       return ok and { ok = true } or fail(turnErr)
     end,

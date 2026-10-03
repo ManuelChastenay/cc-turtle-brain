@@ -110,6 +110,9 @@ _G.textutils = {
 }
 
 ---------------------------------------------------------------- world
+-- Turtles are tables { id, x, y, z, h, fuel, limit, inv, sel, files }.
+-- sim.t is the test's main turtle, driven through the global APIs;
+-- sim.spawn adds more, each with its own APIs (see sim.spawn).
 local DX, DZ = { [0] = 0, 1, 0, -1 }, { [0] = -1, 0, 1, 0 }
 local function key(x, y, z) return x .. "," .. y .. "," .. z end
 sim.key = key
@@ -117,7 +120,23 @@ sim.key = key
 local FUEL = { ["minecraft:coal"] = 80, ["minecraft:charcoal"] = 80, ["minecraft:coal_block"] = 800,
   ["minecraft:lava_bucket"] = 1000 }
 local DROPS = { ["minecraft:stone"] = "minecraft:cobblestone", ["minecraft:coal_ore"] = "minecraft:coal",
-  ["minecraft:grass_block"] = "minecraft:dirt" }
+  ["minecraft:grass_block"] = "minecraft:dirt", ["minecraft:deepslate"] = "minecraft:cobbled_deepslate",
+  ["minecraft:iron_ore"] = "minecraft:raw_iron" }
+
+local function isMain()
+  local _, main = coroutine.running()
+  return main
+end
+
+-- t.fuel = "unlimited" plays a server with need_fuel = false.
+local function newTurtle(id, t)
+  t = t or {}
+  local turtle = { id = id, x = t.x or 0, y = t.y or 31, z = t.z or 0, h = t.h or 0, fuel = t.fuel or 1000,
+    limit = t.fuel == "unlimited" and "unlimited" or 20000, inv = {}, sel = 1, files = {} }
+  for slot, item in pairs(t.inv or {}) do turtle.inv[slot] = { name = item[1], count = item[2] } end
+  sim.over[key(turtle.x, turtle.y, turtle.z)] = false -- the cell it stands in is air once it leaves
+  return turtle
+end
 
 function sim.reset(o)
   o = o or {}
@@ -125,28 +144,34 @@ function sim.reset(o)
   sim.over = {}            -- key -> name or false (air)
   sim.mobs = {}            -- key -> true
   sim.chests = {}          -- key -> { items = {}, cap = n }
-  sim.files = {}
   sim.gps = o.gps ~= false
   sim.sleeps, sim.moves, sim.lost, sim.attacks = 0, 0, 0, 0
+  sim.ground = {}          -- item name -> count dropped on the ground
   sim.dugLog = {}          -- keys dug, in order
-  sim.terminateAtMove = nil
-  -- computer, events and rednet (see the bottom of this file)
+  sim.terminateAtMove, sim.terminateAtAction, sim.actions = nil, nil, 0
+  -- computer, events and rednet (see below)
   sim.id, sim.label, sim.modem = o.id or 1, o.label, o.modem or false
   sim.now, sim.events, sim.timers, sim.lastTimer = 0, {}, {}, 0
   sim.sent = {}            -- every rednet message sent: { to, msg, proto }
-  sim.onSend, sim.onIdle, sim.onSleep = nil, nil, nil
-  local t = o.turtle or {}
-  sim.t = { x = t.x or 0, y = t.y or 31, z = t.z or 0, h = t.h or 0, fuel = t.fuel or 1000, limit = 20000,
-    inv = {}, sel = 1 }
-  for slot, item in pairs(t.inv or {}) do sim.t.inv[slot] = { name = item[1], count = item[2] } end
-  sim.over[key(sim.t.x, sim.t.y, sim.t.z)] = false
+  sim.onSend, sim.onIdle, sim.onSleep, sim.onMove = nil, nil, nil, nil
+  sim.t = newTurtle(sim.id, o.turtle)
+  sim.files = sim.t.files
+  sim.turtles = { sim.t }
   for _, b in ipairs(o.blocks or {}) do sim.set(b[1], b[2], b[3], b[4]) end
-  for k, mod in pairs(package.loaded) do
+  for k in pairs(package.loaded) do
     if k:match("^bot%.") or k:match("^llm%.") then package.loaded[k] = nil end
   end
 end
 
+function sim.turtleAt(x, y, z)
+  for _, t in ipairs(sim.turtles) do
+    if t.x == x and t.y == y and t.z == z then return t end
+  end
+end
+
+-- Block name at a position (other turtles show up as turtle blocks), nil for air.
 function sim.get(x, y, z)
+  if sim.turtleAt(x, y, z) then return "computercraft:turtle_normal" end
   local v = sim.over[key(x, y, z)]
   if v == false then return nil end
   if v ~= nil then return v end
@@ -172,18 +197,18 @@ local function settle(x, y, z) -- falling blocks above (x,y,z) drop into the gap
   end
 end
 
-local function target(side)
-  local t = sim.t
-  if side == "up" then return t.x, t.y + 1, t.z end
-  if side == "down" then return t.x, t.y - 1, t.z end
+-- side: front/back/left/right/up/down (peripheral names top/bottom accepted too)
+local function target(t, side)
+  if side == "up" or side == "top" then return t.x, t.y + 1, t.z end
+  if side == "down" or side == "bottom" then return t.x, t.y - 1, t.z end
   if side == "back" then return t.x - DX[t.h], t.y, t.z - DZ[t.h] end
   if side == "left" then local h = (t.h + 3) % 4 return t.x + DX[h], t.y, t.z + DZ[h] end
   if side == "right" then local h = (t.h + 1) % 4 return t.x + DX[h], t.y, t.z + DZ[h] end
   return t.x + DX[t.h], t.y, t.z + DZ[t.h]
 end
 
-local function addItem(name, count)
-  local inv = sim.t.inv
+local function addItem(t, name, count)
+  local inv = t.inv
   for slot = 1, 16 do
     local it = inv[slot]
     if it and it.name == name and it.count < 64 then
@@ -203,117 +228,209 @@ local function addItem(name, count)
 end
 
 ---------------------------------------------------------------- turtle API
-local function move(side)
-  local t = sim.t
-  if t.fuel < 1 then return false, "Out of fuel" end
-  local x, y, z = target(side)
+local function move(t, side)
+  local unlimited = t.fuel == "unlimited"
+  if not unlimited and t.fuel < 1 then return false, "Out of fuel" end
+  local x, y, z = target(t, side)
   if solid(sim.get(x, y, z)) or sim.mobs[key(x, y, z)] then return false, "Movement obstructed" end
   if y > 319 then return false, "Too high to move" end
   t.x, t.y, t.z = x, y, z
-  t.fuel = t.fuel - 1
+  if not unlimited then t.fuel = t.fuel - 1 end
   sim.moves = sim.moves + 1
+  if sim.onMove then sim.onMove(t) end -- may raise "Terminated" to play a reboot
   if sim.terminateAtMove and sim.moves >= sim.terminateAtMove then error("Terminated", 0) end
   return true
 end
 
-local function detect(side) return solid(sim.get(target(side))) end
+local function detect(t, side) return solid(sim.get(target(t, side))) end
 
-local function inspect(side)
-  local name = sim.get(target(side))
+local function inspect(t, side)
+  local name = sim.get(target(t, side))
   if not name then return false, "No block to inspect" end
   return true, { name = name, state = {}, tags = {} }
 end
 
-local function dig(side)
-  local x, y, z = target(side)
+local function dig(t, side)
+  local x, y, z = target(t, side)
   local name = sim.get(x, y, z)
   if not solid(name) then return false, "Nothing to dig here" end
-  if name == "minecraft:bedrock" then return false, "Unbreakable block detected" end
+  if name == "minecraft:bedrock" or sim.turtleAt(x, y, z) then return false, "Unbreakable block detected" end
   sim.set(x, y, z, nil)
   sim.chests[key(x, y, z)] = nil
   sim.dugLog[#sim.dugLog + 1] = key(x, y, z)
-  addItem(DROPS[name] or name, 1)
+  addItem(t, DROPS[name] or name, 1)
   settle(x, y, z)
   return true
 end
 
-local function attack(side)
-  local k = key(target(side))
+local function attack(t, side)
+  local k = key(target(t, side))
   sim.attacks = sim.attacks + 1
   if sim.mobs[k] then sim.mobs[k] = nil return true end
   return false, "Nothing to attack here"
 end
 
-local function drop(side)
-  local it = sim.t.inv[sim.t.sel]
+local function drop(t, side, count)
+  local it = t.inv[t.sel]
   if not it then return false, "No items to drop" end
-  local chest = sim.chests[key(target(side))]
-  if not chest then sim.t.inv[sim.t.sel] = nil return true end -- onto the ground
-  if #chest.items >= chest.cap then return false, "No space for items" end
-  chest.items[#chest.items + 1] = it
-  sim.t.inv[sim.t.sel] = nil
+  count = math.min(count or it.count, it.count)
+  local chest = sim.chests[key(target(t, side))]
+  if chest and #chest.items >= chest.cap then return false, "No space for items" end
+  if chest then
+    chest.items[#chest.items + 1] = { name = it.name, count = count }
+  else
+    sim.ground[it.name] = (sim.ground[it.name] or 0) + count
+  end
+  it.count = it.count - count
+  if it.count == 0 then t.inv[t.sel] = nil end
   return true
 end
 
-_G.turtle = {
-  forward = function() return move("front") end,
-  back = function() return move("back") end,
-  up = function() return move("up") end,
-  down = function() return move("down") end,
-  turnLeft = function() sim.t.h = (sim.t.h + 3) % 4 return true end,
-  turnRight = function() sim.t.h = (sim.t.h + 1) % 4 return true end,
-  detect = function() return detect("front") end,
-  detectUp = function() return detect("up") end,
-  detectDown = function() return detect("down") end,
-  inspect = function() return inspect("front") end,
-  inspectUp = function() return inspect("up") end,
-  inspectDown = function() return inspect("down") end,
-  dig = function() return dig("front") end,
-  digUp = function() return dig("up") end,
-  digDown = function() return dig("down") end,
-  attack = function() return attack("front") end,
-  attackUp = function() return attack("up") end,
-  attackDown = function() return attack("down") end,
-  drop = function() return drop("front") end,
-  dropUp = function() return drop("up") end,
-  dropDown = function() return drop("down") end,
-  getFuelLevel = function() return sim.t.fuel end,
-  getFuelLimit = function() return sim.t.limit end,
-  getSelectedSlot = function() return sim.t.sel end,
-  select = function(s) sim.t.sel = s return true end,
-  getItemCount = function(s) local it = sim.t.inv[s or sim.t.sel] return it and it.count or 0 end,
-  getItemDetail = function(s)
-    local it = sim.t.inv[s or sim.t.sel]
-    return it and { name = it.name, count = it.count } or nil
-  end,
-  refuel = function(n)
-    local it = sim.t.inv[sim.t.sel]
-    if not it then return false, "No items to combust" end
-    local v = FUEL[it.name]
-    if not v then return false, "Items not combustible" end
-    n = n or it.count
-    if n == 0 then return true end
-    for _ = 1, n do
-      if it.count == 0 then break end
-      sim.t.fuel = math.min(sim.t.limit, sim.t.fuel + v)
-      it.count = it.count - 1
-      if it.name == "minecraft:lava_bucket" then it.name, it.count = "minecraft:bucket", 1 break end
+-- Turtle API for whichever turtle get() returns. Commands that take a tick
+-- in CC yield until a turtle_response event (inside coroutines), so other
+-- coroutines and turtles run in between, like in the game.
+local function makeTurtle(get)
+  local api = {
+    forward = function() return move(get(), "front") end,
+    back = function() return move(get(), "back") end,
+    up = function() return move(get(), "up") end,
+    down = function() return move(get(), "down") end,
+    turnLeft = function() local t = get() t.h = (t.h + 3) % 4 return true end,
+    turnRight = function() local t = get() t.h = (t.h + 1) % 4 return true end,
+    detect = function() return detect(get(), "front") end,
+    detectUp = function() return detect(get(), "up") end,
+    detectDown = function() return detect(get(), "down") end,
+    inspect = function() return inspect(get(), "front") end,
+    inspectUp = function() return inspect(get(), "up") end,
+    inspectDown = function() return inspect(get(), "down") end,
+    dig = function() return dig(get(), "front") end,
+    digUp = function() return dig(get(), "up") end,
+    digDown = function() return dig(get(), "down") end,
+    attack = function() return attack(get(), "front") end,
+    attackUp = function() return attack(get(), "up") end,
+    attackDown = function() return attack(get(), "down") end,
+    drop = function(n) return drop(get(), "front", n) end,
+    dropUp = function(n) return drop(get(), "up", n) end,
+    dropDown = function(n) return drop(get(), "down", n) end,
+    getFuelLevel = function() return get().fuel end,
+    getFuelLimit = function() return get().limit end,
+    getSelectedSlot = function() return get().sel end,
+    select = function(s) get().sel = s return true end,
+    getItemCount = function(s) local t = get() local it = t.inv[s or t.sel] return it and it.count or 0 end,
+    getItemDetail = function(s)
+      local t = get()
+      local it = t.inv[s or t.sel]
+      return it and { name = it.name, count = it.count } or nil
+    end,
+    refuel = function(n)
+      local t = get()
+      local it = t.inv[t.sel]
+      if not it then return false, "No items to combust" end
+      local v = FUEL[it.name]
+      if not v then return false, "Items not combustible" end
+      n = n or it.count
+      if n == 0 then return true end
+      for _ = 1, n do
+        if it.count == 0 then break end
+        t.fuel = math.min(t.limit, t.fuel + v)
+        it.count = it.count - 1
+        if it.name == "minecraft:lava_bucket" then it.name, it.count = "minecraft:bucket", 1 break end
+      end
+      if it.count == 0 then t.inv[t.sel] = nil end
+      return true
+    end,
+  }
+  for _, name in ipairs({ "forward", "back", "up", "down", "turnLeft", "turnRight", "dig", "digUp", "digDown",
+      "attack", "attackUp", "attackDown", "drop", "dropUp", "dropDown", "refuel" }) do
+    local fn = api[name]
+    api[name] = function(...)
+      local r = table.pack(fn(...))
+      sim.actions = sim.actions + 1 -- a reboot "at" an action: it happened, the program never heard back
+      if sim.terminateAtAction and sim.actions >= sim.terminateAtAction then error("Terminated", 0) end
+      if not isMain() then
+        os.queueEvent("turtle_response")
+        os.pullEvent("turtle_response")
+      end
+      return table.unpack(r, 1, r.n)
     end
-    if it.count == 0 then sim.t.inv[sim.t.sel] = nil end
-    return true
-  end,
-}
+  end
+  return api
+end
+
+_G.turtle = makeTurtle(function() return sim.t end)
+
+-- Peripherals around a turtle: chests ("inventory"), a modem on the left if
+-- modem() is true, and adjacent turtles (getID), as CC exposes computers.
+local function makePeripheral(get, modem)
+  return {
+    getNames = function() return modem() and { "left" } or {} end,
+    hasType = function(side, ty)
+      if ty == "modem" then return modem() and side == "left" end
+      if ty ~= "inventory" then return nil end
+      return sim.chests[key(target(get(), side))] ~= nil
+    end,
+    call = function(side, method)
+      local other = sim.turtleAt(target(get(), side))
+      if other and method == "getID" then return other.id end
+      error("No peripheral attached", 2)
+    end,
+  }
+end
+
+local function makeFs(files)
+  return {
+    open = function(path, mode)
+      local store = files()
+      if mode == "r" then
+        local data = store[path]
+        if not data then return nil end
+        return { readAll = function() return data end, close = function() end }
+      end
+      local buf = {}
+      return { write = function(s) buf[#buf + 1] = s end, close = function() store[path] = table.concat(buf) end }
+    end,
+    delete = function(path) files()[path] = nil end,
+  }
+end
+
+-- The main computer reboots: programs and modules are gone, its event queue
+-- is cleared; files, the world and the turtle's position stay.
+function sim.reboot()
+  for k in pairs(package.loaded) do
+    if k:match("^bot%.") or k:match("^llm%.") then package.loaded[k] = nil end
+  end
+  sim.events, sim.timers = {}, {}
+  sim.terminateAtMove, sim.terminateAtAction = nil, nil
+end
+
+-- Another turtle in the same world, with its own APIs, files and computer id.
+-- Its modules load from the repo into its own environment: t.require("bot.nav").
+-- Events and timers are shared, so run turtles side by side with parallel.
+function sim.spawn(id, o)
+  local t = newTurtle(id, o)
+  sim.turtles[#sim.turtles + 1] = t
+  local env = setmetatable({}, { __index = _G })
+  env.turtle = makeTurtle(function() return t end)
+  env.gps = { locate = function() if sim.gps then return t.x, t.y, t.z end end }
+  env.peripheral = makePeripheral(function() return t end, function() return false end)
+  env.fs = makeFs(function() return t.files end)
+  env.os = setmetatable({ getComputerID = function() return t.id end }, { __index = os })
+  local loaded = {}
+  env.require = function(name)
+    if loaded[name] == nil then
+      loaded[name] = assert(loadfile(REPO .. name:gsub("%.", "/") .. ".lua", "t", env))(name)
+    end
+    return loaded[name]
+  end
+  t.require = env.require
+  return t
+end
 
 ---------------------------------------------------------------- events, os, parallel
 -- The main Lua thread plays CC's top level: when it waits for an event it
 -- runs the queue itself (sim.events, then timers in virtual time sim.now,
 -- then sim.onIdle() for the test to inject more; nothing left = error
 -- "SIM_IDLE"). Inside parallel's coroutines, waiting yields like in CC.
-local function isMain()
-  local _, main = coroutine.running()
-  return main
-end
-
 local function nextEvent()
   while true do
     local ev = table.remove(sim.events, 1)
@@ -381,21 +498,6 @@ _G.parallel = {
   waitForAll = function(...) runAll({ ... }, false) end,
 }
 
--- Real turtle commands yield until the server answers (turtle_response);
--- doing the same here lets the other coroutines run in between.
-for _, name in ipairs({ "forward", "back", "up", "down", "turnLeft", "turnRight", "dig", "digUp", "digDown",
-    "attack", "attackUp", "attackDown", "drop", "dropUp", "dropDown", "refuel" }) do
-  local fn = turtle[name]
-  turtle[name] = function(...)
-    local r = table.pack(fn(...))
-    if not isMain() then
-      os.queueEvent("turtle_response")
-      os.pullEvent("turtle_response")
-    end
-    return table.unpack(r, 1, r.n)
-  end
-end
-
 ---------------------------------------------------------------- rednet
 local function copy(v)
   if type(v) ~= "table" then return v end
@@ -436,27 +538,8 @@ _G.rednet = {
 
 ---------------------------------------------------------------- peripherals, files
 _G.gps = { locate = function() if sim.gps then return sim.t.x, sim.t.y, sim.t.z end end }
-
-_G.peripheral = {
-  getNames = function() return sim.modem and { "left" } or {} end,
-  hasType = function(side, t)
-    if t == "modem" then return sim.modem and side == "left" end
-    if t ~= "inventory" then return nil end
-    return sim.chests[key(target(side))] ~= nil
-  end,
-}
-
-_G.fs = {
-  open = function(path, mode)
-    if mode == "r" then
-      local data = sim.files[path]
-      if not data then return nil end
-      return { readAll = function() return data end, close = function() end }
-    end
-    local buf = {}
-    return { write = function(s) buf[#buf + 1] = s end, close = function() sim.files[path] = table.concat(buf) end }
-  end,
-}
+_G.peripheral = makePeripheral(function() return sim.t end, function() return sim.modem end)
+_G.fs = makeFs(function() return sim.t.files end)
 
 _G.sleep = function(t)
   sim.sleeps = sim.sleeps + 1
