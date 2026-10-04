@@ -172,7 +172,7 @@ test("full inventory: unloads into chest behind the start and resumes", function
   end
 end)
 
-test("full inventory: unloads at home chest when none at the start", function()
+test("full inventory: unloads at home chest when none at the start, burning its coal first", function()
   local inv = { [16] = { "minecraft:coal", 5 } }
   for s = 1, 15 do inv[s] = { "minecraft:raw_iron", 64 } end
   sim.reset{ gps = false, turtle = { x = 5, y = 31, z = 5, h = 0, fuel = 5000, inv = inv } }
@@ -183,7 +183,8 @@ test("full inventory: unloads at home chest when none at the start", function()
   local r = mine.mineArea({ direction = "east", length = 3, width = 3, layers = 2, vertical = "down", side = "left" })
   truthy(r.ok, tostring(r.error))
   eq(r.trips, 1)
-  eq(sim.t.inv[16].name, "minecraft:coal", "fuel kept")
+  for _, it in pairs(sim.t.inv) do truthy(it.name ~= "minecraft:coal", "coal still held") end
+  for _, it in ipairs(sim.chests[sim.key(-1, 31, 0)].items) do truthy(it.name ~= "minecraft:coal", "coal stored") end
   eq(sim.t.x, 5) eq(sim.t.z, 5) eq(sim.t.h, 0)
 end)
 
@@ -244,18 +245,43 @@ test("junk never goes into a chest next to the turtle", function()
   eq(sim.t.inv[2].count, 3, "raw iron kept")
 end)
 
-test("unloading keeps one stack of fuel and stores the rest", function()
-  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 500, inv = {
+test("unloading tops up the tank, keeps one stack of fuel and stores the rest", function()
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 19990, inv = {
     { "minecraft:coal", 64 }, { "minecraft:coal", 64 }, { "minecraft:charcoal", 30 }, { "minecraft:raw_iron", 10 } } } }
   sim.set(0, 31, -1, "minecraft:chest")
   saveState(0)
   local nav, inv = require("bot.nav"), require("bot.inv")
   nav.init()
+  local fuel = sim.t.fuel
   local ok, moved = inv.unload()
-  truthy(ok, tostring(moved)) eq(moved, 64 + 30 + 10)
+  truthy(ok, tostring(moved))
+  eq(sim.t.fuel, 20000, "tank full") eq(moved, 63 + 30 + 10, "one coal burned: 10 fuel to the limit")
   local kept = 0
   for _, it in pairs(sim.t.inv) do kept = kept + it.count end
   eq(kept, 64, "fuel items kept")
+  truthy(fuel < 20000, "started below the limit")
+end)
+
+test("unloading drops junk and burns what burns before storing anything", function()
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 500, inv = {
+    { "minecraft:cobblestone", 64 }, { "minecraft:mossy_cobblestone_stairs", 3 }, { "minecraft:raw_copper", 5 },
+    { "minecraft:oak_planks", 10 }, { "minecraft:coal", 3 }, { "minecraft:raw_iron", 7 },
+    { "minecraft:cobblestone_slab", 2 }, { "create:andesite_alloy", 4 } } } }
+  sim.set(0, 31, -1, "minecraft:chest") -- in front: junk goes up instead
+  saveState(0)
+  local nav, inv = require("bot.nav"), require("bot.inv")
+  nav.init()
+  local fuel = sim.t.fuel
+  local ok, moved, junked = inv.unload()
+  truthy(ok, tostring(moved))
+  eq(junked, 64 + 3 + 5 + 2) eq(moved, 7 + 4)
+  eq(sim.t.fuel, fuel + 10 * 15 + 3 * 80, "planks and coal burned")
+  local stored = {}
+  for _, it in ipairs(sim.chests[sim.key(0, 31, -1)].items) do stored[it.name] = (stored[it.name] or 0) + it.count end
+  eq(stored["minecraft:raw_iron"], 7) eq(stored["create:andesite_alloy"], 4)
+  eq(count(stored), 2, "only the keepers went into the chest")
+  eq(sim.ground["minecraft:raw_copper"], 5) eq(sim.ground["minecraft:mossy_cobblestone_stairs"], 3)
+  eq(next(sim.t.inv), nil, "inventory empty")
 end)
 
 test("unlimited fuel (need_fuel = false): jobs run and no fuel is kept back", function()
@@ -271,6 +297,68 @@ test("unlimited fuel (need_fuel = false): jobs run and no fuel is kept back", fu
   local ok, moved = inv.unload()
   truthy(ok, tostring(moved))
   eq(next(sim.t.inv), nil, "inventory empty")
+end)
+
+test("a dig never brings junk back: leftovers dropped in the hole, tunnelling junk dropped on arrival", function()
+  local function terrain(x, y, z)
+    if y > 30 then return nil end
+    return (x + z) % 4 == 0 and "minecraft:iron_ore" or "minecraft:stone"
+  end
+  sim.reset{ gps = false, terrain = terrain, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 } }
+  saveState(0)
+  local nav, skills, plan = require("bot.nav"), require("bot.skills"), require("bot.plan")
+  nav.init()
+  local ok, n, results = plan.run(assert(plan.check({
+    { skill = "mineArea", direction = "north", length = 3, width = 3, layers = 3 },
+    { skill = "goTo", x = 6, y = 26, z = 0 } }, skills.list)))
+  truthy(ok, "step " .. n .. ": " .. tostring(results[n] and results[n].error))
+  local held, iron = {}, 0
+  for _, it in pairs(sim.t.inv) do held[it.name] = (held[it.name] or 0) + it.count end
+  for _, k in ipairs(sim.dugLog) do
+    local x, y, z = k:match("(-?%d+),(-?%d+),(-?%d+)")
+    if terrain(tonumber(x), tonumber(y), tonumber(z)) == "minecraft:iron_ore" then iron = iron + 1 end
+  end
+  eq(held["minecraft:cobblestone"], nil, "cobblestone held")
+  eq(held["minecraft:raw_iron"], iron, "raw iron kept")
+  eq(sim.ground["minecraft:cobblestone"], #sim.dugLog - iron, "every stone dug was dropped")
+  local stone = 0 -- the box only: the door cell, at the turtle's level, is air
+  for k in pairs(boxCells({ x = 0, y = 31, z = 0 }, 0, 3, 3, 3, "down", "right")) do
+    local x, y, z = k:match("(-?%d+),(-?%d+),(-?%d+)")
+    if terrain(tonumber(x), tonumber(y), tonumber(z)) == "minecraft:stone" then stone = stone + 1 end
+  end
+  eq(results[1].junked, stone, "junk reported by the dig")
+  truthy(#sim.dugLog > 27, "goTo tunnelled through stone")
+end)
+
+test("refuelAll tries every slot, stops at the fuel limit, leaves what does not burn", function()
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 19000, inv = {
+    { "minecraft:raw_iron", 5 }, { "minecraft:oak_log", 10 }, { "minecraft:coal", 64 }, { "minecraft:coal", 64 },
+    { "minecraft:stick", 3 } } } }
+  sim.t.sel = 7
+  local nav = require("bot.nav")
+  eq(nav.refuelAll(), 1000)
+  eq(sim.t.fuel, 20000)
+  eq(sim.t.inv[1].count, 5, "raw iron") eq(sim.t.inv[2], nil, "logs burned first")
+  eq(sim.t.inv[3].count, 64 - 11, "only the coal that fits") eq(sim.t.inv[4].count, 64) eq(sim.t.inv[5].count, 3)
+  eq(sim.t.sel, 7, "selected slot restored")
+  sim.reset{ gps = false, turtle = { fuel = "unlimited", inv = { { "minecraft:coal", 5 } } } }
+  nav = require("bot.nav")
+  eq(nav.refuelAll(), 0) eq(sim.t.inv[1].count, 5, "nothing burned with unlimited fuel")
+end)
+
+test("a full inventory burns its wood and coal before going home to unload", function()
+  local inv = { [13] = { "minecraft:oak_planks", 64 }, [14] = { "minecraft:oak_planks", 64 } }
+  for s = 1, 12 do inv[s] = { "minecraft:raw_gold", 64 } end
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 1000, inv = inv },
+    terrain = function(x, y, z) if y <= 30 then return "minecraft:iron_ore" end end }
+  saveState(0) -- no chest anywhere: a trip home would fail
+  local nav, mine = require("bot.nav"), require("bot.mine")
+  nav.init()
+  local r = mine.mineArea({ direction = "north", length = 2, width = 1, layers = 3, vertical = "down", side = "right" })
+  truthy(r.ok, tostring(r.error))
+  eq(r.trips, 0)
+  for _, it in pairs(sim.t.inv) do truthy(it.name ~= "minecraft:oak_planks", "planks still held") end
+  truthy(sim.t.fuel > 2000, "planks in the tank: " .. sim.t.fuel)
 end)
 
 ---------------------------------------------------------------- nav
@@ -318,21 +406,23 @@ end)
 
 test("skills: move, face, goHome, setHome, unload, refuel", function()
   sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 10,
-    inv = { { "minecraft:cobblestone", 20 }, { "minecraft:coal", 2 } } } }
+    inv = { { "minecraft:raw_iron", 20 }, { "minecraft:coal", 2 }, { "minecraft:stick", 4 } } } }
   sim.set(-1, 31, 0, "minecraft:chest")
   saveState(0)
   local nav, skills, plan = require("bot.nav"), require("bot.skills"), require("bot.plan")
   nav.init()
   local steps = assert(plan.check({
-    { skill = "unload" }, { skill = "move", direction = "right", blocks = 3 }, { skill = "move", direction = "up", blocks = "2" },
-    { skill = "face", direction = "south" }, { skill = "setHome" }, { skill = "goTo", x = 0, y = 31, z = 0 },
-    { skill = "goHome" }, { skill = "refuel" } }, skills.list))
+    { skill = "refuel" }, { skill = "unload" }, { skill = "move", direction = "right", blocks = 3 },
+    { skill = "move", direction = "up", blocks = "2" }, { skill = "face", direction = "south" }, { skill = "setHome" },
+    { skill = "goTo", x = 0, y = 31, z = 0 }, { skill = "goHome" } }, skills.list))
   local ok, n, results = plan.run(steps)
   truthy(ok, "step " .. n .. ": " .. tostring(results[n] and results[n].error))
-  eq(results[1].items, 20, "unloaded")
+  eq(results[1].gained, 2 * 80 + 4 * 5, "coal and sticks burned")
+  eq(sim.t.inv[2], nil, "coal burned") eq(sim.t.inv[3], nil, "sticks burned")
+  eq(results[2].items, 20, "unloaded")
   eq(sim.t.x, 3) eq(sim.t.y, 33) eq(sim.t.z, 0) eq(sim.t.h, 2, "home facing")
-  truthy(results[8].fuel > 100, "refueled")
-  eq(sim.t.inv[2], nil, "coal burned")
+  local again = plan.run(assert(plan.check({ { skill = "refuel" } }, skills.list)))
+  eq(again, false, "nothing left to burn")
   local s = skills.state()
   truthy(s:find("pos 3,33,0 facing south"), s)
 end)
@@ -452,6 +542,19 @@ test("brain.lua end to end + install.lua parses", function()
   eq(#calls, 1)
   truthy(table.concat(out, "\n"):find("Done: mineArea"), table.concat(out, "\n"))
   assert(loadfile(REPO .. "install.lua"))
+end)
+
+test("brain refuel: burns every slot that burns, no LLM call", function()
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 500,
+    inv = { { "minecraft:raw_iron", 3 }, { "minecraft:coal", 2 }, { "minecraft:oak_planks", 4 } } } }
+  local calls = fakeClient({})
+  local out, realPrint = {}, print
+  _G.print = function(s) out[#out + 1] = tostring(s) end
+  local ok, err = pcall(assert(loadfile(REPO .. "brain.lua")), "refuel")
+  _G.print = realPrint
+  truthy(ok, tostring(err)) eq(#calls, 0)
+  eq(out[1], "Fuel 720 (+220)")
+  eq(sim.t.inv[1].count, 3) eq(sim.t.inv[2], nil) eq(sim.t.inv[3], nil)
 end)
 
 ---------------------------------------------------------------- fleet: turtle side
@@ -702,11 +805,12 @@ test("worker: moves aside on makeway when idle, ignores it when busy", function(
 end)
 
 ---------------------------------------------------------------- fleet: brain side, scripted turtles
--- fakes[id] = { label, pos, mode, job, kept, silentUntil, finishAfter }; mode: nil
+-- fakes[id] = { label, pos, mode, job, kept, silentUntil, finishAfter, old }; mode: nil
 -- (works), "fail", "busy" (never finishes), "lost" (silent after the plan),
 -- "forget" (acts restarted). job = a job it is running, kept = a result it
 -- holds until acked, silentUntil = ignores everything until that virtual
--- time, finishAfter = finishes `job` after answering that many pings.
+-- time, finishAfter = finishes `job` after answering that many pings,
+-- old = a worker from before `update` (ignores it). f.updated is set once it updated.
 local function fakeFleet(fakes)
   sim.modem = true
   sim.onSend = function(to, msg)
@@ -750,6 +854,14 @@ local function fakeFleet(fakes)
           end
         elseif msg.type == "stop" then
           f.stopped = true
+        elseif msg.type == "update" and not f.old then
+          if f.job then
+            sim.deliver(id, { type = "updated", ok = false, error = "busy with job " .. f.job .. ", not updated" })
+          else
+            f.updated = true
+            sim.deliver(id, { type = "updating" })
+            sim.deliver(id, { type = "updated", ok = true, summary = "updated, rebooting" })
+          end
         end
       end
     end
@@ -1181,6 +1293,104 @@ test("fleet: a turtle silent for two minutes that comes back is waited for", fun
   eq(results[7].ok, true, tostring(results[7].error))
   truthy(sim.now >= 130 and sim.now < 600, "virtual time " .. sim.now)
   eq(events[1], "silent")
+end)
+
+---------------------------------------------------------------- refuel and update commands
+-- shell.run and os.reboot for worker.lua and fleet.lua; runs records every shell.run.
+local function fakeShell(installOk)
+  local runs = {}
+  _G.shell = { run = function(...) runs[#runs + 1] = table.concat({ ... }, " ") return installOk end }
+  os.reboot = function() error("REBOOT", 0) end
+  return runs, function() _G.shell, os.reboot = nil, nil end
+end
+
+test("worker: update reinstalls and reboots when idle; refuses while busy; reports a failed install", function()
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
+  local runs, restore = fakeShell(true)
+  local script
+  local function feed(list) -- the brain's messages, one each time the worker waits (sim.reset clears onIdle)
+    script = list
+    sim.onIdle = function()
+      local m = table.remove(script, 1)
+      if m then sim.deliver(99, m) end
+      return m ~= nil
+    end
+  end
+  feed({ { type = "update" } })
+  local _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  eq(ok, false) eq(err, "REBOOT")
+  eq(runs[1], "/install.lua") eq(#runs, 1)
+  eq(sim.sent[1].msg.type, "updating") eq(sim.sent[2].msg.type, "updated") eq(sim.sent[2].msg.ok, true)
+
+  -- busy: refused, nothing installed, the job goes on
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
+  runs = fakeShell(true)
+  feed({ { type = "plan", job = "j1", steps = { { skill = "mineArea", direction = "north", length = 3, width = 2, layers = 3 } } } })
+  sim.onSend = function(_, msg)
+    if msg.type == "progress" then sim.deliver(99, { type = "update" }) end
+  end
+  _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  eq(err, "SIM_IDLE") eq(#runs, 0, "installs")
+  local refused, result
+  for _, s in ipairs(sim.sent) do
+    if s.msg.type == "updated" then refused = s.msg elseif s.msg.type == "result" then result = s.msg end
+  end
+  eq(refused.ok, false) truthy(refused.error:find("busy with job j1", 1, true), refused.error)
+  eq(result.ok, true, "the job finished")
+
+  -- the installer fails: reported, no reboot
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
+  runs = fakeShell(false)
+  feed({ { type = "update" }, { type = "hello", quick = true } })
+  _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  restore()
+  eq(err, "SIM_IDLE", "still running")
+  eq(sim.sent[2].msg.type, "updated") eq(sim.sent[2].msg.ok, false)
+  eq(sim.sent[3].msg.type, "status", "answers again after a failed install")
+end)
+
+test("fleet update: idle turtles update, busy and old ones are reported, then this computer installs", function()
+  sim.reset{}
+  local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } },
+                  [8] = { label = "b", pos = { x = 9, y = 31, z = 0 }, job = "x" },
+                  [9] = { label = "c", pos = { x = 9, y = 31, z = 9 }, old = true } }
+  fakeFleet(fakes)
+  local runs, restore = fakeShell(true)
+  local calls = fakeClient({})
+  local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "update")
+  restore()
+  truthy(ok, tostring(err)) eq(#calls, 0, "LLM calls")
+  eq(fakes[7].updated, true) eq(fakes[8].updated, nil) eq(fakes[9].updated, nil)
+  local text = table.concat(out, "\n")
+  truthy(text:find("#7 updated, rebooting", 1, true), text)
+  truthy(text:find("#8 busy with job x, not updated", 1, true), text)
+  truthy(text:find("#9 no answer", 1, true), text)
+  eq(#runs, 1) eq(runs[1], "/install.lua", "this computer last")
+  truthy(sim.now >= 5 and sim.now < 30, "waited for the old worker: " .. sim.now)
+end)
+
+test("fleet refuel: one refuel step for idle turtles, no LLM call, nothing left to resume", function()
+  sim.reset{}
+  local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } },
+                  [8] = { label = "b", pos = { x = 9, y = 31, z = 0 }, job = "x" },
+                  [9] = { label = "c", pos = { x = 9, y = 31, z = 9 } } }
+  fakeFleet(fakes)
+  local calls = fakeClient({})
+  local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "refuel")
+  truthy(ok, tostring(err)) eq(#calls, 0, "LLM calls")
+  eq(fakes[7].steps[1].skill, "refuel") eq(fakes[9].steps[1].skill, "refuel") eq(fakes[8].steps, nil, "busy one left alone")
+  local text = table.concat(out, "\n")
+  truthy(text:find("1 busy turtle(s) left alone", 1, true) and text:find("#7 Done: 1 steps", 1, true), text)
+  eq(sim.files["/fleet_job.json"], nil, "job file")
+  -- only the ids given
+  fakes[7].steps, fakes[9].steps = nil, nil
+  out, ok = quietly(assert(loadfile(REPO .. "fleet.lua")), "refuel", "9")
+  truthy(ok) eq(fakes[7].steps, nil) eq(fakes[9].steps[1].skill, "refuel")
+  -- "refuel" with other words is a goal for the LLM
+  calls = fakeClient({ "No." })
+  package.loaded["llm.agent"] = nil -- it keeps the client it was loaded with
+  quietly(assert(loadfile(REPO .. "fleet.lua")), "refuel", "then", "dig")
+  eq(#calls, 1)
 end)
 
 ---------------------------------------------------------------- dashboard (bot/ui, bot/registry, bot/dash)

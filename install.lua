@@ -53,7 +53,9 @@ if ... ~= "--updated" then
     f.write(latest)
     f.close()
     print("Installer updated, restarting it")
-    shell.run("/install.lua", "--updated")
+    -- <Claude> Fail too if the new copy failed (worker.lua's update checks it).
+    -- An empty message: the new copy already printed why.
+    if not shell.run("/install.lua", "--updated") then error("", 0) end
     return
   end
 end

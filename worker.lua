@@ -6,7 +6,8 @@
   plans, the other keeps answering the brain (status pings, "busy", stop)
   and other turtles (makeway). Jobs are saved to disk (bot/job.lua): after
   a reboot the worker carries on where it stopped, and keeps the result
-  until the brain acknowledges it. Protocol: bot/net.lua.
+  until the brain acknowledges it. When idle, `update` from the brain
+  reinstalls the code from GitHub and reboots into it. Protocol: bot/net.lua.
 ]]
 local nav = require("bot.nav")
 local plan = require("bot.plan")
@@ -87,6 +88,19 @@ local function runner()
   end
 end
 
+-- <Claude> Runs /install.lua, then reboots: startup.lua starts the new worker.
+-- The listener is busy meanwhile; nothing else needs it, the turtle is idle.
+local function update(from)
+  net.send(from, { type = "updating" })
+  print("Updating from GitHub")
+  if not shell.run("/install.lua") then
+    net.send(from, { type = "updated", ok = false, error = "install failed (see the turtle's screen)" })
+    return
+  end
+  net.send(from, { type = "updated", ok = true, summary = "updated, rebooting" })
+  os.reboot()
+end
+
 local function handle(from, msg)
   if msg.type == "hello" then
     net.send(from, status(msg.quick))
@@ -108,6 +122,10 @@ local function handle(from, msg)
     os.queueEvent("ccbrain_stop")
   elseif msg.type == "makeway" and not current then
     nav.makeWay(msg.from)
+  elseif msg.type == "update" and current then -- the job would resume under different code
+    net.send(from, { type = "updated", ok = false, error = ("busy with job %s, not updated"):format(tostring(current.id)) })
+  elseif msg.type == "update" then
+    update(from)
   end
 end
 

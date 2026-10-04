@@ -3,6 +3,7 @@
   One LLM call turns the goal into a plan of skills (bot/skills.lua) that
   Lua runs on its own; the LLM is called again only if a step fails.
   A fleet brain keeps this flow and sends each turtle its plan over rednet.
+  `brain refuel` burns everything in the inventory that burns (no LLM call).
 ]]
 local agent = require("llm.agent")
 local nav = require("bot.nav")
@@ -24,6 +25,12 @@ where the turtle faces when that step starts):
 ]] .. plan.catalog(skills.list)
 
 local goal = table.concat({ ... }, " ")
+-- <Claude> `brain refuel`: burn everything that burns, with no LLM call.
+if goal == "refuel" then
+  local gained = nav.refuelAll()
+  print(("Fuel %s (+%d)"):format(tostring(turtle.getFuelLevel()), gained))
+  return
+end
 if goal == "" then write("Goal: ") goal = read() end
 
 nav.init()

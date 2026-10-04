@@ -6,8 +6,9 @@
   turtle walks the middle one and digs up and down, so a 3-deep area costs
   one pass of fuel. Every move stays inside the box, except the first step
   in "down" mode (the block above the box, in front of the turtle).
-  When the inventory fills, it drops junk (bot/config.lua); if that is not
-  enough, it unloads into a chest next to the start or at home, then resumes.
+  When the inventory fills, it drops junk (bot/config.lua), then burns what
+  burns; if that is not enough, it unloads into a chest next to the start or
+  at home, then resumes. Junk still held at the end is dropped in the hole.
 ]]
 local nav = require("bot.nav")
 local inv = require("bot.inv")
@@ -169,6 +170,7 @@ local function dig(h, args, ctx)
       -- Dropping junk usually frees enough room to skip the trip home.
       local room = 1 + (v.up and 1 or 0) + (v.down and 1 or 0)
       if inv.freeSlots() < room then junked = junked + inv.discardJunk() end
+      if inv.freeSlots() < room then nav.refuelAll() end -- coal and wood: into the tank, not the chest
       if inv.freeSlots() < room then unloadTrip() end
       local atStart = dist(here(), ORIGIN) == 0
       local cost = (atStart and exitCost(v) or dist(here(), v)) + exitCost(v) -- get there and back
@@ -185,6 +187,7 @@ local function dig(h, args, ctx)
       if v.down then check(nav.clear("down")) end
       checkpoint(idx + 1)
     end
+    junked = junked + inv.discardJunk() -- in the hole, not carried home
     leave()
   end)
 

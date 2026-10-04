@@ -5,6 +5,9 @@
   if some turtle failed, once all have finished. Ctrl+T stops every turtle
   that is still working. After this computer reboots, `fleet resume` waits
   for the job again (put it in startup.lua).
+  No LLM call: `fleet refuel [ids]` (idle turtles burn what burns) and
+  `fleet update` (turtles reinstall from GitHub and reboot, then this
+  computer runs install).
 ]]
 local agent = require("llm.agent")
 local plan = require("bot.plan")
@@ -52,6 +55,26 @@ if goal == "dash" then
   return
 end
 
+-- <Claude> `fleet update`: busy turtles refuse, so their jobs never resume
+-- under different code. This computer updates last.
+if goal == "update" then
+  print("Looking for turtles...")
+  local ids = {}
+  for id in pairs(fleet.discover(2)) do ids[#ids + 1] = id end
+  table.sort(ids)
+  if #ids == 0 then
+    print("No turtle answered.")
+  else
+    print(("Updating %d turtle(s), this takes a few seconds"):format(#ids))
+    print((fleet.outcome(fleet.update(ids, function(id, msg)
+      if msg.type == "updating" then print(("#%d installing"):format(id)) end
+    end))))
+  end
+  print("Updating this computer")
+  shell.run("/install.lua")
+  return
+end
+
 local saved = fleet.loadRun()
 
 -- <Claude> `fleet resume` (e.g. from startup.lua): wait again for the job
@@ -71,6 +94,25 @@ elseif saved then
   printError(("Unfinished job %s dropped (`fleet resume` would have waited for it)."):format(saved.job))
   fleet.clearRun()
 end
+
+-- <Claude> `fleet refuel` or `fleet refuel 3 5`: one refuel step for the idle turtles.
+local refuelIds = goal:match("^refuel([%d%s]*)$")
+if refuelIds then
+  local only
+  for id in refuelIds:gmatch("%d+") do
+    only = only or {}
+    only[tonumber(id)] = true
+  end
+  print("Looking for turtles...")
+  local turtles = fleet.discover(2)
+  local ids, busy = fleet.idle(turtles, only)
+  if busy > 0 then print(("%d busy turtle(s) left alone"):format(busy)) end
+  if #ids == 0 then print("No idle turtle to refuel.") return end
+  local r = fleet.runSteps(skills.list, turtles, ids, { { skill = "refuel" } }, onEvent, "refuel")
+  print(r.ok and r.summary or r.error .. (r.results and ("\n" .. r.results) or ""))
+  return
+end
+
 if goal == "" then write("Goal: ") goal = read() end
 
 print("Looking for turtles...")

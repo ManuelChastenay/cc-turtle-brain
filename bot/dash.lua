@@ -9,13 +9,13 @@
       (the same flow as `fleet <goal>`), /commands run in Lua at once.
   Coroutines under parallel: listener (rednet -> bot/registry), ticker (poll
   the turtles with a quick hello, redraw every second), screen, keyboard,
-  touches and runner (goals, home, resume: one at a time, because the fleet
-  saves a single job). A blocking http.post in the runner only stops the
-  runner: every other coroutine still gets every event.
+  touches and runner (goals, home, refuel, update, resume: one at a time,
+  because the fleet saves a single job). A blocking http.post in the runner
+  only stops the runner: every other coroutine still gets every event.
   The drawing is bot/ui.lua, the state bot/registry.lua.
-  Ctrl+T quits the dashboard only: parallel stops at the first coroutine that
-  raises it, so the turtles are not told to stop and the saved job stays;
-  the next `fleet dash` (e.g. from startup.lua after a reboot) waits for it
+  /exit or Ctrl+T quits the dashboard only and gives the terminal back to
+  the shell: the turtles are not told to stop and the saved job stays; the
+  next `fleet dash` (e.g. from startup.lua after a reboot) waits for it
   again, and workers keep their results until acknowledged. Stopping turtles
   is /stop, or the buttons.
 ]]
@@ -34,9 +34,12 @@ local LOG_WIDTH = 44
 local HELP = {
   "/stop [id]  stop every turtle and the goal, or one turtle",
   "/home [id]  stop everything, then send turtles home",
+  "/refuel [id] idle turtles burn what burns",
+  "/update [id] idle turtles reinstall and reboot",
   "/resume     wait again for an interrupted job",
   "/scale n    monitor text scale, 0.5 to 5",
   "/clear      clear the log",
+  "/exit       back to the shell, turtles go on",
   "Anything else is a goal for the LLM.",
 }
 
@@ -175,6 +178,11 @@ function M.run(opts)
     if msg.type == "silent" then say(("#%d silent for %d s, still waiting"):format(id, msg.seconds)) end
   end
 
+  -- <Claude> The outcome of a runPlans call made without the LLM (/home, /refuel).
+  local function report(r)
+    say(r.ok and r.summary or (r.error .. (r.results and ("\n" .. r.results) or "")))
+  end
+
   -- <Claude> One LLM run: find the turtles, let the model plan, wait for them.
   -- A stop ends it without another LLM call (see agent.run's stopped()).
   local function ask(display, prompt)
@@ -256,9 +264,34 @@ function M.run(opts)
       until idle or os.clock() >= deadline
       turtles = fleet.discover(2)
     end
-    local tool = fleet.tool(skills, turtles, onEvent, "go home")
-    local r = tool.handler({ plans = { { turtles = ids, steps = { { skill = "goHome" } } } } })
-    say(r.ok and r.summary or (r.error .. (r.results and ("\n" .. r.results) or "")))
+    report(fleet.runSteps(skills, turtles, ids, { { skill = "goHome" } }, onEvent, "go home"))
+  end
+
+  -- <Claude> The idle turtles in job.ids (all if nil) burn what burns. Busy ones are left alone.
+  function JOBS.refuel(job)
+    state.goal, state.llm = "refuel", "waiting"
+    local turtles = fleet.discover(2)
+    local ids, busy = fleet.idle(turtles, job.ids)
+    if busy > 0 then say(("refuel: %d busy turtle(s) left alone"):format(busy)) end
+    if #ids == 0 then say("no idle turtle to refuel") return end
+    report(fleet.runSteps(skills, turtles, ids, { { skill = "refuel" } }, onEvent, "refuel"))
+  end
+
+  -- <Claude> Turtles reinstall from GitHub and reboot (busy ones refuse). Not
+  -- this computer: it is running the code (/exit, install, fleet dash).
+  function JOBS.update(job)
+    state.goal, state.llm = "update", "waiting"
+    local ids = {}
+    for id in pairs(fleet.discover(2)) do
+      if not job.ids or job.ids[id] then ids[#ids + 1] = id end
+    end
+    table.sort(ids)
+    if #ids == 0 then say("no turtle to update") return end
+    say(("updating %d turtle(s) from GitHub"):format(#ids))
+    say((fleet.outcome(fleet.update(ids, function(id, msg)
+      if msg.type == "updating" then say(("#%d installing"):format(id)) end
+    end))))
+    say("this computer: /exit, install, fleet dash")
   end
 
   local function enqueue(job)
@@ -309,6 +342,10 @@ function M.run(opts)
     enqueue({ kind = "home" })
   end
 
+  local function refuelAll()
+    if pending > 0 then say("refuel: wait for the current job or stop it") else enqueue({ kind = "refuel" }) end
+  end
+
   local function command(line)
     local name, rest = line:match("^/(%S+)%s*(.*)$")
     local id = tonumber(rest)
@@ -328,6 +365,16 @@ function M.run(opts)
       end
     elseif name == "resume" then
       if pending > 0 then feedback = "busy: wait for the current job or /stop it" else enqueue({ kind = "resume" }) end
+    elseif name == "refuel" or name == "update" then
+      if rest ~= "" and not id then
+        feedback = ("usage: /%s [id]"):format(name)
+      elseif pending > 0 then
+        feedback = "busy: wait for the current job or /stop it"
+      else
+        enqueue({ kind = name, ids = id and { [id] = true } or nil })
+      end
+    elseif name == "exit" or name == "quit" then
+      os.queueEvent("dash_exit")
     elseif name == "scale" then
       local scale = tonumber(rest)
       if not monitor then
@@ -421,7 +468,8 @@ function M.run(opts)
         local a = ui.hit(monLayout, x, y)
         if a and a.type == "stop" then stopOne(a.id)
         elseif a and a.type == "stopAll" then stopAll()
-        elseif a and a.type == "homeAll" then homeAll() end
+        elseif a and a.type == "homeAll" then homeAll()
+        elseif a and a.type == "refuelAll" then refuelAll() end
       end
     end
   end
@@ -430,8 +478,29 @@ function M.run(opts)
   -- <Claude> A job saved before the last stop or reboot is picked up again, like `fleet resume`.
   if fleet.loadRun() then enqueue({ kind = "resume" }) end
 
-  local ok, err = pcall(parallel.waitForAny, listener, ticker, screen, keyboard, touches, runner)
+  local function exit() os.pullEvent("dash_exit") end -- /exit
+
+  local ok, err = pcall(parallel.waitForAny, listener, ticker, screen, keyboard, touches, runner, exit)
+  -- <Claude> Hand the screens back: the shell prompt starts on a clean terminal.
+  pcall(function()
+    if not monitor then return end
+    monitor.setTextColor(colors.white)
+    monitor.setBackgroundColor(colors.black)
+    monitor.clear()
+    monitor.setCursorPos(1, 1)
+    monitor.write("Dashboard closed. `fleet dash` reopens it.")
+  end)
+  if term.isColor and term.isColor() then
+    term.setTextColor(colors.white)
+    term.setBackgroundColor(colors.black)
+  end
+  term.clear()
   term.setCursorBlink(false)
+  term.setCursorPos(1, 1)
+  term.write("Dashboard closed. Turtles keep working;")
+  term.setCursorPos(1, 2)
+  term.write("`fleet dash` reopens it.")
+  term.setCursorPos(1, 3)
   if not ok and err ~= "Terminated" then error(err, 0) end
 end
 

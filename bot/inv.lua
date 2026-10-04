@@ -1,8 +1,13 @@
 --[[ <Claude>
   Inventory helpers: free slots, a compact summary for the LLM, dropping
   junk, and unloading into an adjacent chest (anything exposing an
-  "inventory" peripheral: chests, barrels, modded storage). Unloading keeps
-  up to config.keepFuel fuel items.
+  "inventory" peripheral: chests, barrels, modded storage). Unloading drops
+  junk and burns what burns first, then keeps up to config.keepFuel fuel
+  items.
+  Junk (config.junk) is never stored: it is dropped when the inventory
+  needs room, at the end of a dig or a trip that dug through something
+  (bot/mine.lua, bot/skills.lua) and before unloading. Not after every
+  block: that would leave one item entity per block on the ground.
 ]]
 local nav = require("bot.nav")
 local config = require("bot.config")
@@ -67,12 +72,16 @@ function M.discardJunk()
   return dropped
 end
 
--- <Claude> Returns true, itemsMoved | false, err. Keeps up to config.keepFuel
--- fuel items, none if fuel is unlimited. Turns toward a chest on the
--- left/right/back and turns back afterwards.
+-- <Claude> Returns true, itemsMoved, junkDropped | false, err. Junk is
+-- dropped first (never into the chest) and everything that burns goes into
+-- the tank (nav.refuelAll) before anything is stored. Keeps up to
+-- config.keepFuel fuel items, none if fuel is unlimited. Turns toward a
+-- chest on the left/right/back and turns back afterwards.
 function M.unload()
   local side = M.findChest()
   if not side then return false, "no chest next to the turtle" end
+  local junked = M.discardJunk()
+  nav.refuelAll()
   local before = nav.heading()
   if TURNS[side] then
     if not before then return false, "heading unknown, cannot turn to the chest" end
@@ -97,7 +106,7 @@ function M.unload()
   turtle.select(1)
   if TURNS[side] then nav.face(before) end
   if err then return false, err end
-  return true, moved
+  return true, moved, junked
 end
 
 return M

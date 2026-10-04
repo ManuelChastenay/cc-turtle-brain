@@ -114,6 +114,24 @@ function M.refuel(target)
   return M.fuel() >= target
 end
 
+-- <Claude> Tries every slot, not only config.fuelItems: anything that burns
+-- (planks, logs, sticks...) goes into the tank, up to the fuel limit (CC
+-- burns no more of a stack than fits). Returns the fuel gained.
+function M.refuelAll()
+  local before = M.fuel()
+  if before == math.huge then return 0 end
+  local selected = turtle.getSelectedSlot()
+  for slot = 1, 16 do
+    if M.fuel() >= turtle.getFuelLimit() then break end
+    if turtle.getItemCount(slot) > 0 then
+      turtle.select(slot)
+      turtle.refuel() -- false for items that do not burn
+    end
+  end
+  turtle.select(selected)
+  return M.fuel() - before
+end
+
 ---------------------------------------------------------------- heading
 
 -- <Claude> Steps one block forward or back into free space (turning if both

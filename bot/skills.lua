@@ -49,10 +49,13 @@ local function splitBox(a, positions)
 end
 
 -- <Claude> Refuels from the inventory for the whole trip before moving.
+-- Junk from digging through obstacles on the way is dropped on arrival.
 local function travel(target)
   local need = nav.distance(nav.pos(), target)
   if not nav.refuel(need) then return fail(("needs %d fuel, has %d"):format(need, nav.fuel())) end
+  local dug = nav.dug
   local ok, err = nav.goTo(target)
+  if nav.dug > dug then inv.discardJunk() end
   if not ok then return fail(err) end
   return { ok = true }
 end
@@ -144,21 +147,24 @@ M.list = {
   },
   {
     name = "unload",
-    doc = "Put everything except fuel into a chest next to the turtle.",
+    doc = "Put everything into a chest next to the turtle (burns what burns first, keeps some fuel).",
     run = function()
-      local ok, moved = inv.unload()
-      return ok and { ok = true, items = moved } or fail(moved)
+      local ok, moved, junked = inv.unload()
+      if not ok then return fail(moved) end
+      local fuel = nav.fuel()
+      return { ok = true, items = moved, junked = junked, fuel = fuel ~= math.huge and fuel or nil }
     end,
   },
   {
     name = "refuel",
-    doc = "Burn every fuel item in the inventory.",
+    doc = "Burn everything in the inventory that burns, up to the fuel limit.",
     run = function()
-      local before = nav.fuel()
-      if before == math.huge then return { ok = true } end
-      nav.refuel(math.huge)
-      if nav.fuel() == before then return fail("no fuel items in the inventory") end
-      return { ok = true, fuel = nav.fuel() }
+      if nav.fuel() == math.huge then return { ok = true } end
+      local gained = nav.refuelAll()
+      if gained == 0 and nav.fuel() < turtle.getFuelLimit() then
+        return fail(("nothing in the inventory burns (fuel %d)"):format(nav.fuel()))
+      end
+      return { ok = true, fuel = nav.fuel(), gained = gained }
     end,
   },
 }

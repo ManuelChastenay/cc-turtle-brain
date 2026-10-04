@@ -10,7 +10,7 @@
     layout = M.layout(view, w, h) -> { rows, buttons }
       rows: exactly h rows of chunks { text, fg, bg }, each row exactly w wide
       buttons: { { y, x1, x2, action } } with action { type = "stop", id } |
-               { type = "stopAll" } | { type = "homeAll" }
+               { type = "stopAll" } | { type = "homeAll" } | { type = "refuelAll" }
     M.draw(term, view) draws it and returns the layout; M.hit(layout, x, y)
     answers a monitor_touch with the action under that cell (or nil).
 ]]
@@ -167,10 +167,15 @@ function M.layout(view, w, h)
   while #rows < h - 1 do rows[#rows + 1] = fill({}, w) end
 
   local y = #rows + 1
-  local stopAll, homeAll = "[STOP ALL]", "[HOME ALL]"
-  rows[#rows + 1] = fill({ chunk(stopAll, "white", "red"), chunk(" "), chunk(homeAll, "white", "blue") }, w)
-  buttons[#buttons + 1] = { y = y, x1 = 1, x2 = #stopAll, action = { type = "stopAll" } }
-  buttons[#buttons + 1] = { y = y, x1 = #stopAll + 2, x2 = #stopAll + 1 + #homeAll, action = { type = "homeAll" } }
+  local bar, x = {}, 1
+  for _, b in ipairs({ { "[STOP ALL]", "red", "stopAll" }, { "[HOME ALL]", "blue", "homeAll" },
+                       { "[REFUEL ALL]", "green", "refuelAll" } }) do
+    if x > 1 then bar[#bar + 1] = chunk(" ") end
+    bar[#bar + 1] = chunk(b[1], "white", b[2])
+    buttons[#buttons + 1] = { y = y, x1 = x, x2 = x + #b[1] - 1, action = { type = b[3] } }
+    x = x + #b[1] + 1
+  end
+  rows[#rows + 1] = fill(bar, w)
 
   -- <Claude> Tiny screens: keep the bottom rows (the button bar) and move the buttons up with them.
   while #rows > h do

@@ -8,6 +8,9 @@
                                                (or at once: result with ok = false if busy/invalid)
                      ack { job }               the brain has the result: the turtle forgets it
                      stop                      the running plan stops where it is, reply: result
+                     update                    reinstall from GitHub and reboot, reply: updating,
+                                               then updated (a busy turtle only answers updated
+                                               with ok = false)
     turtle -> brain  status { label, state, pos, fuel, job, step, steps, text, result, quick }
                                                job = id of the running plan; step/steps/text =
                                                the step it is on (only with a job); fuel = number
@@ -17,6 +20,8 @@
                                                when deciding a job was lost)
                      progress { job, step, steps, text }
                      result { job, ok, summary | error, failed, completed, state, pos }
+                     updating                  install started
+                     updated { ok, summary | error }   rebooting into the new code if ok
   A rebooted worker resumes its job (same id), so a turtle that went silent
   can come back; the brain waits for it (bot/fleet.lua).
     turtle -> turtle makeway { from }          sent to a turtle blocking the way; if idle,

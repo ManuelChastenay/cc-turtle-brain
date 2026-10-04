@@ -9,9 +9,13 @@ return {
   fuelItems  = { "coal", "coke", "lava_bucket", "blaze_rod", "dried_kelp_block" },
   fuelMargin = 20,                -- fuel kept on top of what a job needs
   keepFuel   = 64,                -- fuel items kept when unloading (64 coal = 5120 fuel); none if fuel is unlimited
-  junk       = {                  -- dropped on the ground when the inventory fills ({} keeps everything)
-    "minecraft:cobblestone", "minecraft:cobbled_deepslate", "minecraft:dirt", "minecraft:gravel",
+  junk       = {                  -- dropped on the ground, never stored ({} keeps everything); see bot/inv.lua
+    "minecraft:cobblestone", "minecraft:cobblestone_stairs", "minecraft:cobblestone_slab", "minecraft:cobblestone_wall",
+    "minecraft:mossy_cobblestone", "minecraft:mossy_cobblestone_stairs", "minecraft:mossy_cobblestone_slab",
+    "minecraft:mossy_cobblestone_wall",
+    "minecraft:cobbled_deepslate", "minecraft:dirt", "minecraft:gravel",
     "minecraft:andesite", "minecraft:diorite", "minecraft:granite", "minecraft:tuff", "minecraft:netherrack",
+    "minecraft:raw_copper",
   },
   protect    = {                  -- never dug, even when in the way
     "computercraft:", "chest", "barrel", "shulker_box", "furnace", "_door", "glass", "_bed",

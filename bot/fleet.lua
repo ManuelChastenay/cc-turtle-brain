@@ -5,7 +5,9 @@
   only after that, so the blocking http.post never runs while a rednet
   message is expected. The job in flight is saved (/fleet_job.json), so
   `fleet resume` can wait for it again after the computer reboots. Ctrl+T
-  while waiting stops every busy turtle. Protocol: bot/net.lua.
+  while waiting stops every busy turtle. Also the no-LLM commands
+  (runSteps: /home, /refuel; update: reinstall the workers' code).
+  Protocol: bot/net.lua.
 ]]
 local plan = require("bot.plan")
 local net = require("bot.net")
@@ -13,6 +15,7 @@ local net = require("bot.net")
 local M = {}
 
 local PING_EVERY, WARN_AFTER, LOST_AFTER = 15, 60, 600
+M.UPDATE_ACK, M.UPDATE_WAIT = 5, 180 -- seconds to answer `update`, and to finish installing
 local RUN_PATH = "/fleet_job.json"
 
 local function sortedIds(t)
@@ -214,6 +217,63 @@ function M.tool(skills, turtles, onEvent, goal)
       return { ok = false, error = ("%d of %d turtles failed"):format(failed, count), results = text, state = M.describe(turtles) }
     end,
   }
+end
+
+-- <Claude> Sorted ids of the idle turtles (no job), only those in the set
+-- `only` if given. Returns ids, number of busy turtles left out.
+function M.idle(turtles, only)
+  local ids, busy = {}, 0
+  for _, id in ipairs(sortedIds(turtles)) do
+    if not only or only[id] then
+      if turtles[id].job then busy = busy + 1 else ids[#ids + 1] = id end
+    end
+  end
+  return ids, busy
+end
+
+-- <Claude> The same steps for every turtle in ids, with no LLM call (the
+-- dashboard's /home and /refuel, `fleet refuel`). Waits like runPlans, then
+-- forgets the job: a later resume must not ask the LLM about it. Returns the
+-- runPlans result ({ ok, summary } | { ok = false, error, results }).
+function M.runSteps(skills, turtles, ids, steps, onEvent, goal)
+  local result = M.tool(skills, turtles, onEvent, goal).handler({ plans = { { turtles = ids, steps = steps } } })
+  M.clearRun()
+  return result
+end
+
+-- <Claude> Has the turtles in ids reinstall their code from GitHub: the
+-- worker runs /install.lua and reboots into it (a busy one refuses). One
+-- that does not answer within UPDATE_ACK s runs a worker from before
+-- `update` existed: run `install` on it by hand once. onEvent(id, msg) sees
+-- `updating` and `updated`. Returns { [id] = { ok, summary | error } } for M.outcome.
+function M.update(ids, onEvent)
+  onEvent = onEvent or function() end
+  local start, waiting, results = os.clock(), {}, {}
+  for _, id in ipairs(ids) do
+    waiting[id] = "asked"
+    net.send(id, { type = "update" })
+  end
+  while next(waiting) do
+    local from, msg = rednet.receive(net.PROTOCOL, 1)
+    if from and waiting[from] and type(msg) == "table" then
+      if msg.type == "updating" then
+        waiting[from] = "installing"
+        onEvent(from, msg)
+      elseif msg.type == "updated" then
+        waiting[from], results[from] = nil, msg
+        onEvent(from, msg)
+      end
+    end
+    local elapsed = os.clock() - start
+    for id, stage in pairs(waiting) do
+      if stage == "asked" and elapsed >= M.UPDATE_ACK then
+        waiting[id], results[id] = nil, { ok = false, error = "no answer: an older worker? run `install` on it by hand once" }
+      elseif elapsed >= M.UPDATE_WAIT then
+        waiting[id], results[id] = nil, { ok = false, error = ("install still running after %d s"):format(M.UPDATE_WAIT) }
+      end
+    end
+  end
+  return results
 end
 
 return M

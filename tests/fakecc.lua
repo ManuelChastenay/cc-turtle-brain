@@ -118,7 +118,7 @@ local function key(x, y, z) return x .. "," .. y .. "," .. z end
 sim.key = key
 
 local FUEL = { ["minecraft:coal"] = 80, ["minecraft:charcoal"] = 80, ["minecraft:coal_block"] = 800,
-  ["minecraft:lava_bucket"] = 1000 }
+  ["minecraft:lava_bucket"] = 1000, ["minecraft:oak_planks"] = 15, ["minecraft:oak_log"] = 15, ["minecraft:stick"] = 5 }
 local DROPS = { ["minecraft:stone"] = "minecraft:cobblestone", ["minecraft:coal_ore"] = "minecraft:coal",
   ["minecraft:grass_block"] = "minecraft:dirt", ["minecraft:deepslate"] = "minecraft:cobbled_deepslate",
   ["minecraft:iron_ore"] = "minecraft:raw_iron" }
@@ -329,8 +329,8 @@ local function makeTurtle(get)
       if not it then return false, "No items to combust" end
       local v = FUEL[it.name]
       if not v then return false, "Items not combustible" end
-      n = n or it.count
-      if n == 0 then return true end
+      n = math.min(n or it.count, math.ceil((t.limit - t.fuel) / v)) -- like CC: no more than fits
+      if n <= 0 then return true end
       for _ = 1, n do
         if it.count == 0 then break end
         t.fuel = math.min(t.limit, t.fuel + v)
