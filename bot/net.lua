@@ -1,23 +1,24 @@
 --[[ <Claude>
   Rednet protocol between the fleet brain (fleet.lua, on a computer) and
   turtles running worker.lua. Messages are tables with a `type`:
-    brain -> turtle  hello { quick }           reply: status. quick = true skips the inventory
-                                               scan (16 game ticks on the turtle): the dashboard
-                                               polls with it every few seconds
+    brain -> turtle  hello { quick }           reply: status. quick = true leaves out the state
+                                               line and result: the dashboard polls with it
+                                               every few seconds
                      plan { job, steps }       reply: accepted, then progress..., result
                                                (or at once: result with ok = false if busy/invalid)
                      ack { job }               the brain has the result: the turtle forgets it
                      stop                      the running plan stops where it is, reply: result
-                     update                    reinstall from GitHub and reboot, reply: updating,
-                                               then updated (a busy turtle only answers updated
-                                               with ok = false)
-    turtle -> brain  status { label, state, pos, fuel, job, step, steps, text, result, quick }
+                     update { sha, n }         install that commit (the newest if no sha) and
+                                               reboot, reply: updating, then updated (a busy
+                                               turtle only answers updated with ok = false)
+    turtle -> brain  status { label, state, pos, fuel, job, step, steps, text, result, quick, version }
                                                job = id of the running plan; step/steps/text =
                                                the step it is on (only with a job); fuel = number
                                                or "unlimited"; result = last result message, until
                                                acknowledged. A quick status has no state or
                                                result and quick = true (bot/fleet.lua ignores it
-                                               when deciding a job was lost)
+                                               when deciding a job was lost); version = the
+                                               code it runs, "v8 d2ffe09" (bot/version.lua)
                      progress { job, step, steps, text }
                      result { job, ok, summary | error, failed, completed, state, pos }
                      updating                  install started

@@ -23,6 +23,7 @@ local agent = require("llm.agent")
 local fleet = require("bot.fleet")
 local net = require("bot.net")
 local registry = require("bot.registry")
+local version = require("bot.version")
 local ui = require("bot.ui")
 
 local M = {}
@@ -35,7 +36,7 @@ local HELP = {
   "/stop [id]  stop every turtle and the goal, or one turtle",
   "/home [id]  stop everything, then send turtles home",
   "/refuel [id] idle turtles burn what burns",
-  "/update [id] idle turtles reinstall and reboot",
+  "/update [id] newest code here + idle turtles",
   "/resume     wait again for an interrupted job",
   "/scale n    monitor text scale, 0.5 to 5",
   "/clear      clear the log",
@@ -66,10 +67,13 @@ local function wrap(text, width)
   return out
 end
 
--- <Claude> opts = { system = LLM system prompt, skills = skill list, scale = monitor text scale }.
--- Returns when Ctrl+T is pressed; turtles keep working (see the header).
+-- <Claude> opts = { system = LLM system prompt, skills = skill list, scale = monitor text scale,
+-- shell = the program's shell (/update runs install with it) }.
+-- Returns on /exit or Ctrl+T; turtles keep working (see the header).
 function M.run(opts)
   local skills = opts.skills or require("bot.skills").list
+  local here = version.read() -- the code this dashboard runs
+  local installing = false -- the installer's output owns the terminal
   local reg = registry.new()
   local state = { llm = "idle", calls = 0, tokensIn = 0, tokensOut = 0, goal = nil }
   local editor = { text = "", pos = 0, history = {}, hist = nil }
@@ -101,6 +105,7 @@ function M.run(opts)
     local view = reg.view(os.clock(), { llm = state.llm, calls = state.calls, tokensIn = state.tokensIn,
       tokensOut = state.tokensOut, goal = state.goal })
     if monitor then monLayout = ui.draw(monitor, view) end
+    if installing then return end
     local w, h = term.getSize()
     local body = math.max(1, h - 2)
     if monitor then
@@ -277,21 +282,42 @@ function M.run(opts)
     report(fleet.runSteps(skills, turtles, ids, { { skill = "refuel" } }, onEvent, "refuel"))
   end
 
-  -- <Claude> Turtles reinstall from GitHub and reboot (busy ones refuse). Not
-  -- this computer: it is running the code (/exit, install, fleet dash).
+  -- <Claude> Like `fleet update`: this computer installs the newest commit
+  -- (its output shows on the terminal meanwhile; the monitor stays up), then
+  -- the turtles in job.ids (all if nil) install the same one and reboot (busy
+  -- ones refuse). The dashboard runs the code it started with until
+  -- /exit and `fleet dash`.
   function JOBS.update(job)
     state.goal, state.llm = "update", "waiting"
+    local sh = opts.shell or shell
+    if not sh then say("no shell to run install with: /exit, then fleet update") return end
+    installing = true
+    if term.isColor and term.isColor() then
+      term.setTextColor(colors.white)
+      term.setBackgroundColor(colors.black)
+    end
+    term.clear()
+    term.setCursorPos(1, 1)
+    local ran, installed = pcall(sh.run, "/install.lua")
+    installing = false
+    term.clear()
+    if not ran and installed == "Terminated" then error(installed, 0) end
+    if not ran or not installed then
+      say("install failed on this computer, turtles left alone (run install in the shell to see why)")
+      return
+    end
+    local target = version.read()
+    say(("this computer: %s installed; /exit, fleet dash to run it"):format(version.text(target)))
     local ids = {}
     for id in pairs(fleet.discover(2)) do
       if not job.ids or job.ids[id] then ids[#ids + 1] = id end
     end
     table.sort(ids)
     if #ids == 0 then say("no turtle to update") return end
-    say(("updating %d turtle(s) from GitHub"):format(#ids))
-    say((fleet.outcome(fleet.update(ids, function(id, msg)
+    say(("updating %d turtle(s) to %s"):format(#ids, target and version.text(target) or "the newest commit"))
+    say((fleet.outcome(fleet.update(ids, target, function(id, msg)
       if msg.type == "updating" then say(("#%d installing"):format(id)) end
     end))))
-    say("this computer: /exit, install, fleet dash")
   end
 
   local function enqueue(job)
@@ -474,7 +500,8 @@ function M.run(opts)
     end
   end
 
-  say(monitor and "dashboard up (monitor found)" or "dashboard up (no monitor: drawing on the terminal)")
+  say((monitor and "dashboard up (monitor found), %s" or "dashboard up (no monitor: drawing on the terminal), %s")
+    :format(version.text(here)))
   -- <Claude> A job saved before the last stop or reboot is picked up again, like `fleet resume`.
   if fleet.loadRun() then enqueue({ kind = "resume" }) end
 

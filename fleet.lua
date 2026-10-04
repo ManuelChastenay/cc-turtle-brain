@@ -6,14 +6,15 @@
   that is still working. After this computer reboots, `fleet resume` waits
   for the job again (put it in startup.lua).
   No LLM call: `fleet refuel [ids]` (idle turtles burn what burns) and
-  `fleet update` (turtles reinstall from GitHub and reboot, then this
-  computer runs install).
+  `fleet update` (this computer installs the newest commit, then the turtles
+  install the same one and reboot).
 ]]
 local agent = require("llm.agent")
 local plan = require("bot.plan")
 local skills = require("bot.skills")
 local net = require("bot.net")
 local fleet = require("bot.fleet")
+local version = require("bot.version")
 
 local SYSTEM = [[You plan jobs for a fleet of ComputerCraft turtles in Minecraft.
 Put the whole goal in ONE runPlans call: a list of plans, each giving a group
@@ -51,27 +52,26 @@ if not net.open() then error("fleet needs a modem (wireless or ender)", 0) end
 -- Goals typed there run exactly like `fleet <goal>`; a job saved before a
 -- reboot is waited for again by itself.
 if goal == "dash" then
-  require("bot.dash").run({ system = SYSTEM, skills = skills.list })
+  require("bot.dash").run({ system = SYSTEM, skills = skills.list, shell = shell })
   return
 end
 
--- <Claude> `fleet update`: busy turtles refuse, so their jobs never resume
--- under different code. This computer updates last.
+-- <Claude> `fleet update`: this computer first, then every turtle installs
+-- the commit it got (one GitHub API call for the whole fleet). Busy turtles
+-- refuse, so their jobs never resume under different code.
 if goal == "update" then
+  print("Updating this computer")
+  if not shell.run("/install.lua") then printError("Install failed here: turtles left alone.") return end
+  local target = version.read()
   print("Looking for turtles...")
   local ids = {}
   for id in pairs(fleet.discover(2)) do ids[#ids + 1] = id end
   table.sort(ids)
-  if #ids == 0 then
-    print("No turtle answered.")
-  else
-    print(("Updating %d turtle(s), this takes a few seconds"):format(#ids))
-    print((fleet.outcome(fleet.update(ids, function(id, msg)
-      if msg.type == "updating" then print(("#%d installing"):format(id)) end
-    end))))
-  end
-  print("Updating this computer")
-  shell.run("/install.lua")
+  if #ids == 0 then print("No turtle answered.") return end
+  print(("Updating %d turtle(s) to %s"):format(#ids, target and version.text(target) or "the newest commit"))
+  print((fleet.outcome(fleet.update(ids, target, function(id, msg)
+    if msg.type == "updating" then print(("#%d installing"):format(id)) end
+  end))))
   return
 end
 

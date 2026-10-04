@@ -4,10 +4,10 @@
   "inventory" peripheral: chests, barrels, modded storage). Unloading drops
   junk and burns what burns first, then keeps up to config.keepFuel fuel
   items.
-  Junk (config.junk) is never stored: it is dropped when the inventory
-  needs room, at the end of a dig or a trip that dug through something
-  (bot/mine.lua, bot/skills.lua) and before unloading. Not after every
-  block: that would leave one item entity per block on the ground.
+  Junk (config.junk) is never stored: mining drops it after every cell
+  (bot/mine.lua), a trip that dug through something on arrival
+  (bot/skills.lua), and unloading before anything goes into the chest.
+  Once per cell, not per dig: a drop takes 8 ticks, as long as a move.
 ]]
 local nav = require("bot.nav")
 local config = require("bot.config")
@@ -16,6 +16,8 @@ local M = {}
 
 local SIDES = { "front", "top", "bottom", "left", "right", "back" }
 local TURNS = { left = 3, right = 1, back = 2 }
+local DROP = { top = turtle.dropUp, bottom = turtle.dropDown, front = turtle.drop }
+local DETECT = { top = turtle.detectUp, bottom = turtle.detectDown, front = turtle.detect }
 
 function M.freeSlots()
   local n = 0
@@ -52,23 +54,36 @@ end
 
 -- <Claude> Drops junk (config.junk, exact item names) on the ground to free
 -- slots without a trip home; it despawns after 5 minutes. Uses a side with
--- no inventory so nothing lands in a chest by mistake. Returns items dropped.
-function M.discardJunk()
+-- no inventory, so nothing lands in a chest by mistake: one of `open` (sides
+-- the caller just dug), else an empty one, else a solid one. Returns items dropped.
+function M.discardJunk(open)
   local junk = {}
   for _, name in ipairs(config.junk) do junk[name] = true end
-  local drop
-  for _, d in ipairs({ { "top", turtle.dropUp }, { "bottom", turtle.dropDown }, { "front", turtle.drop } }) do
-    if not peripheral.hasType(d[1], "inventory") then drop = d[2] break end
+  local drop -- picked at the first junk slot: a detect costs a tick, reading slots does not
+  local function pick()
+    for _, side in ipairs(open or {}) do
+      if not peripheral.hasType(side, "inventory") then return DROP[side] end
+    end
+    local blocked
+    for _, side in ipairs({ "top", "bottom", "front" }) do
+      if not peripheral.hasType(side, "inventory") then
+        if not DETECT[side]() then return DROP[side] end
+        blocked = blocked or DROP[side] -- the item gets pushed out of the block, somewhere near
+      end
+    end
+    return blocked or false
   end
   local dropped = 0
-  for slot = 1, drop and 16 or 0 do
+  for slot = 1, 16 do
     local item = turtle.getItemDetail(slot)
     if item and junk[item.name] then
+      if drop == nil then drop = pick() end
+      if not drop then break end
       turtle.select(slot)
       if drop() then dropped = dropped + item.count end
     end
   end
-  turtle.select(1)
+  if drop then turtle.select(1) end
   return dropped
 end
 

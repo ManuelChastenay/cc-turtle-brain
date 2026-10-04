@@ -7,18 +7,22 @@
   and other turtles (makeway). Jobs are saved to disk (bot/job.lua): after
   a reboot the worker carries on where it stopped, and keeps the result
   until the brain acknowledges it. When idle, `update` from the brain
-  reinstalls the code from GitHub and reboots into it. Protocol: bot/net.lua.
+  installs a commit from GitHub and reboots into it. Every status carries
+  the version it runs (bot/version.lua). Protocol: bot/net.lua.
 ]]
 local nav = require("bot.nav")
 local plan = require("bot.plan")
 local skills = require("bot.skills")
 local net = require("bot.net")
 local jobs = require("bot.job")
+local version = require("bot.version")
 
 if not net.open() then error("worker needs a modem (wireless or ender)", 0) end
 local saved = jobs.load()
 nav.init(saved ~= nil) -- resuming: no calibration moves in the middle of a job unless needed
-print(("Worker #%d %s ready"):format(os.getComputerID(), os.getComputerLabel() or ""))
+local running = version.read() -- the code running now, until the next reboot
+local VERSION = version.text(running)
+print(("Worker #%d %s ready, %s"):format(os.getComputerID(), os.getComputerLabel() or "", VERSION))
 print(skills.state())
 
 local current -- { id, boss, steps, record } while a job runs
@@ -42,12 +46,12 @@ nav.onTurtleInWay = function(id)
 end
 
 -- <Claude> `result` is the last job's result until the brain acknowledges it.
--- A quick status (the dashboard's poll) leaves out `state` and `result`:
--- state scans the inventory, which stalls the whole turtle for 16 ticks.
+-- A quick status (the dashboard's poll every few seconds) leaves out
+-- `state` and `result` to stay small.
 local function status(quick)
   local fuel = nav.fuel()
   local msg = { type = "status", label = os.getComputerLabel(), pos = nav.pos(), job = current and current.id,
-                fuel = fuel == math.huge and "unlimited" or fuel }
+                fuel = fuel == math.huge and "unlimited" or fuel, version = VERSION }
   if current then msg.step, msg.steps, msg.text = current.step, #current.steps, current.text end
   if quick then
     msg.quick = true
@@ -88,16 +92,27 @@ local function runner()
   end
 end
 
--- <Claude> Runs /install.lua, then reboots: startup.lua starts the new worker.
--- The listener is busy meanwhile; nothing else needs it, the turtle is idle.
-local function update(from)
+-- <Claude> Runs /install.lua for msg.sha (the commit the brain runs; the
+-- newest one if none), then reboots: startup.lua starts the new worker. No
+-- reboot when this worker already runs that commit. The listener is busy
+-- meanwhile; nothing else needs it, the turtle is idle.
+local function update(from, msg)
   net.send(from, { type = "updating" })
   print("Updating from GitHub")
-  if not shell.run("/install.lua") then
+  local args = { "/install.lua" }
+  if type(msg.sha) == "string" and msg.sha:match("^%x+$") then
+    args[2], args[3] = msg.sha, tonumber(msg.n) and tostring(math.floor(msg.n)) or nil
+  end
+  if not shell.run(table.unpack(args)) then
     net.send(from, { type = "updated", ok = false, error = "install failed (see the turtle's screen)" })
     return
   end
-  net.send(from, { type = "updated", ok = true, summary = "updated, rebooting" })
+  local after = version.read()
+  if running and after and running.sha == after.sha then
+    net.send(from, { type = "updated", ok = true, summary = "already at " .. version.text(after) })
+    return
+  end
+  net.send(from, { type = "updated", ok = true, summary = ("updated to %s, rebooting"):format(version.text(after)) })
   os.reboot()
 end
 
@@ -125,7 +140,7 @@ local function handle(from, msg)
   elseif msg.type == "update" and current then -- the job would resume under different code
     net.send(from, { type = "updated", ok = false, error = ("busy with job %s, not updated"):format(tostring(current.id)) })
   elseif msg.type == "update" then
-    update(from)
+    update(from, msg)
   end
 end
 

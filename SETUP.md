@@ -53,9 +53,11 @@ wget https://raw.githubusercontent.com/ManuelChastenay/cc-turtle-brain/main/inst
 install
 ```
 - **Label every turtle.** An unlabeled turtle loses its files when broken. The label also shows in the fleet roster.
-- `install` downloads all 18 files and updates itself first, so new files arrive in one run. Re-run `install` to update.
-- Fleet turtles can be updated from the brain computer instead: `fleet update` (or `/update` in the dashboard). Each turtle still runs its own `install`, so in private-repo mode every turtle needs `/.github_token`. A turtle installed before this command existed must run `install` by hand once.
-- The raw URL can serve stale files for about 5 minutes after a push.
+- `install` downloads all 19 files and updates itself first, so new files arrive in one run. Re-run `install` to update.
+- It prints the version: `Version v8 d2ffe09 (2026-10-04)` plus the commit message. `v8` counts the commits on main (higher is newer), `d2ffe09` is the commit. All files come from that commit, and the version is saved in `/.version`. If it is already installed, nothing is downloaded (`install force` downloads it again). `install <commit sha>` installs a given commit.
+- Finding the newest commit costs one GitHub API call. Without a token the limit is 60 calls an hour for the whole server IP. If GitHub refuses, `install` still works from the branch and says `version unknown`.
+- Fleet turtles can be updated from the brain computer instead: `fleet update` (or `/update` in the dashboard). The computer installs the newest commit first, then each turtle installs that same commit (no API call on the turtles) and reboots. In private-repo mode every turtle still needs `/.github_token`. A turtle installed before this command existed must run `install` by hand once.
+- The raw URL of the branch can serve stale files for about 5 minutes after a push. That only matters for `wget` and for installers older than versions; `install` itself downloads by commit.
 - The raw URL for `wget` only works while the repo is public. Private mode needs `/.github_token`, and the first download then needs another route.
 - `install` never touches `startup.lua` or your secrets.
 
@@ -99,7 +101,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | Turtle terminal | `brain refuel` | Burn everything in the inventory that burns, no LLM call |
 | Computer terminal | `fleet <goal>` | One LLM call plans for all turtles; Ctrl+T stops the busy turtles |
 | Computer terminal | `fleet refuel [ids]` | Idle turtles (all, or the ids given) burn what burns, no LLM call |
-| Computer terminal | `fleet update` | Idle turtles reinstall from GitHub and reboot, then this computer runs `install` |
+| Computer terminal | `fleet update` | This computer installs the newest commit, then idle turtles install the same one and reboot |
 | Computer terminal | `fleet resume` | Wait again for the job saved before a reboot |
 | Computer terminal | `fleet dash` | Dashboard: monitor plus a prompt on the last terminal line |
 
@@ -110,7 +112,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | `/stop [id]` | Stop all turtles and the goal, or one turtle |
 | `/home [id]` | Stop everything, then send turtles home (one turtle only if no goal is running) |
 | `/refuel [id]` | Idle turtles burn what burns (all, or one) |
-| `/update [id]` | Idle turtles reinstall from GitHub and reboot (not this computer) |
+| `/update [id]` | Like `fleet update`; the dashboard keeps its old code until `/exit` and `fleet dash` |
 | `/resume` | Wait again for an interrupted job |
 | `/scale n` | Monitor text scale, 0.5 to 5 |
 | `/clear` | Clear the log |
@@ -122,7 +124,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 - Touch **[STOP ALL]**, **[HOME ALL]** or a busy turtle's **[stop]** on an advanced monitor. Without a monitor it draws on the terminal.
 - Touch **[REFUEL ALL]** to run `/refuel` for every idle turtle.
 - `/exit` or Ctrl+T quits the dashboard only and clears the screen for the shell. Turtles keep working and the job is waited for again at the next `fleet dash`.
-- To update the brain computer itself: `/exit`, `install`, `fleet dash` (or `/exit` then `fleet update`, which does the turtles and the computer).
+- The log shows this computer's version at start, and each turtle's when it joins or comes back from an update.
 - Columns shrink with width (from `bot/ui.lua`): the stop button appears at about 30 columns, the name at 44 and the position at 60.
 - A computer terminal is 51 wide, so it shows names but no positions. A 4x3 monitor at scale 0.5 should be about 79 wide and shows everything. Use `/scale 0.5` on a narrow monitor.
 - The turtle's own terminal is small (39x13): long replies scroll.
@@ -146,6 +148,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | `/job_result.json` | worker | last result, kept until the brain acknowledges it |
 | `/fleet_job.json` | fleet brain | job in flight, used by `fleet resume` |
 | `/llm_last.json` | brain / fleet computer | raw last LLM response (read this first when a run misbehaves) |
+| `/.version` | every machine | installed version: `{ n, sha, date, message }` |
 | `/install.lua`, `startup.lua` | every machine | installer; your boot hook |
 
 **Reboots.**
@@ -165,7 +168,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | `fuelItems` | coal, coke, lava_bucket, blaze_rod, dried_kelp_block | Burned for fuel (substring match) |
 | `keepFuel` | 64 | Fuel items kept when unloading (none if fuel is unlimited) |
 | `fuelMargin` | 20 | Extra fuel kept on top of a job's need |
-| `junk` | cobblestone and mossy cobblestone (+ stairs, slab, wall), cobbled deepslate, dirt, gravel, andesite, diorite, granite, tuff, netherrack, raw copper | Exact names. Never stored: dropped when the inventory fills, at the end of each dig, after a trip that dug through something, and before unloading. `{}` keeps everything. |
+| `junk` | cobblestone and mossy cobblestone (+ stairs, slab, wall), cobbled deepslate, dirt, gravel, andesite, diorite, granite, tuff, netherrack, raw copper | Exact names. Never stored: dropped into the hole after every mined cell (about 20% slower digging), after a trip that dug through something, and before unloading. `{}` keeps everything. |
 | `protect` | `computercraft:`, chest, barrel, shulker_box, furnace, `_door`, glass, `_bed` | Never dug, even in the way |
 | `turtleWaits` | 20 | About 1 s retries when another turtle blocks the way |
 | `maxSteps` | 20 | Longest plan accepted |
@@ -180,8 +183,8 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | Turtle-meets-turtle (right of way, step aside, `makeway`) | Sim-tested only |
 | Junk dropping, unload at chest or home | Sim-tested only |
 | Dashboard (`fleet dash`, monitor, touch, `/commands`) | Sim-tested only; real monitor sizes and touch events unverified |
-| Refuel commands, `fleet update` / `/update`, `/exit` | Sim-tested only |
-| Test suite | **106 passed, 0 failed** (run on 2026-10-03 with `python tests/run.py`) |
+| Refuel commands, `fleet update` / `/update`, `/exit`, versions | Sim-tested only |
+| Test suite | **111 passed, 0 failed** (run on 2026-10-03 with `python tests/run.py`) |
 
 ### Known limits that matter for setup
 - No pathfinding: `goTo` walks axis by axis and digs through whatever is in the way (protected blocks excepted).
@@ -189,7 +192,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 - The fleet replans only once every turtle has finished.
 - The dashboard runs one goal at a time.
 - Rednet is not authenticated: anyone on the server could send plans to your workers.
-- Dropped junk becomes item entities that despawn after 5 minutes. Many turtles keep a few hundred alive near the dig.
+- Dropped junk becomes item entities that despawn after 5 minutes: about one per mined cell, so roughly 120 per digging turtle at any time. Many turtles keep a few thousand around the dig. If the server lags, ask for junk to be dropped only when the inventory fills again.
 - Whether a turtle can read an adjacent turtle's id with `peripheral.call(side, "getID")` is untested in-game. If it can't, a coin flip decides who steps aside (slower).
 - The computers and turtles must be in loaded chunks. A frozen turtle resumes when its chunk loads again.
 

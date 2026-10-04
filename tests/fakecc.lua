@@ -395,6 +395,7 @@ local function makeFs(files)
       return { write = function(s) buf[#buf + 1] = s end, close = function() store[path] = table.concat(buf) end }
     end,
     delete = function(path) files()[path] = nil end,
+    exists = function(path) return files()[path] ~= nil end,
   }
 end
 

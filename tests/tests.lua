@@ -330,6 +330,53 @@ test("a dig never brings junk back: leftovers dropped in the hole, tunnelling ju
   truthy(#sim.dugLog > 27, "goTo tunnelled through stone")
 end)
 
+-- Counts the turtle's drops per side while fn runs (inv.lua must be loaded inside fn).
+local function countDrops(fn)
+  local real, counts = {}, { top = 0, bottom = 0, front = 0 }
+  for side, name in pairs({ top = "dropUp", bottom = "dropDown", front = "drop" }) do
+    real[name] = turtle[name]
+    turtle[name] = function(...) counts[side] = counts[side] + 1 return real[name](...) end
+  end
+  local ok, err = pcall(fn)
+  for name, f in pairs(real) do turtle[name] = f end
+  if not ok then error(err, 0) end
+  return counts
+end
+
+test("mining drops the junk once per cell, into the block it just dug below", function()
+  local r, held
+  local counts = countDrops(function()
+    sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 } }
+    saveState(0)
+    local nav, mine = require("bot.nav"), require("bot.mine")
+    nav.init()
+    r = mine.mineArea({ direction = "north", length = 4, width = 3, layers = 3, vertical = "down", side = "right" },
+      { save = function()
+        for _, it in pairs(sim.t.inv) do truthy(it.name ~= "minecraft:cobblestone", "junk held after a cell") end
+      end })
+  end)
+  truthy(r.ok, tostring(r.error))
+  eq(r.junked, 36) eq(sim.ground["minecraft:cobblestone"], 36)
+  eq(counts.bottom, 12, "one drop per cell") eq(counts.top, 0) eq(counts.front, 0)
+end)
+
+test("junk goes to an empty side when it can, never into an inventory", function()
+  local counts = countDrops(function()
+    sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 100, inv = { { "minecraft:cobblestone", 5 } } } }
+    sim.set(0, 32, 0, "minecraft:stone") -- above; below is ground
+    saveState(0)
+    local nav, inv = require("bot.nav"), require("bot.inv")
+    nav.init()
+    eq(inv.discardJunk(), 5) -- front is open
+    sim.t.inv[1] = { name = "minecraft:cobblestone", count = 3 }
+    sim.set(0, 31, -1, "minecraft:stone")
+    eq(inv.discardJunk(), 3) -- walled in: the first side with no inventory
+    sim.t.inv[1] = { name = "minecraft:raw_iron", count = 2 }
+    eq(inv.discardJunk(), 0) -- no junk: no side looked at
+  end)
+  eq(counts.front, 1) eq(counts.top, 1) eq(counts.bottom, 0)
+end)
+
 test("refuelAll tries every slot, stops at the fuel limit, leaves what does not burn", function()
   sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 19000, inv = {
     { "minecraft:raw_iron", 5 }, { "minecraft:oak_log", 10 }, { "minecraft:coal", 64 }, { "minecraft:coal", 64 },
@@ -810,7 +857,8 @@ end)
 -- "forget" (acts restarted). job = a job it is running, kept = a result it
 -- holds until acked, silentUntil = ignores everything until that virtual
 -- time, finishAfter = finishes `job` after answering that many pings,
--- old = a worker from before `update` (ignores it). f.updated is set once it updated.
+-- old = a worker from before `update` (ignores it). f.updated = the commit it was
+-- asked to install (true when none), once it updated.
 local function fakeFleet(fakes)
   sim.modem = true
   sim.onSend = function(to, msg)
@@ -858,9 +906,10 @@ local function fakeFleet(fakes)
           if f.job then
             sim.deliver(id, { type = "updated", ok = false, error = "busy with job " .. f.job .. ", not updated" })
           else
-            f.updated = true
+            f.updated = msg.sha or true
             sim.deliver(id, { type = "updating" })
-            sim.deliver(id, { type = "updated", ok = true, summary = "updated, rebooting" })
+            sim.deliver(id, { type = "updated", ok = true, summary = msg.sha
+              and ("updated to v%s %s, rebooting"):format(tostring(msg.n), msg.sha:sub(1, 7)) or "updated, rebooting" })
           end
         end
       end
@@ -1149,7 +1198,7 @@ test("nav: walled in, it measures its heading one block up; sealed in after a cu
   eq(ok, false) truthy(err:find("heading unknown", 1, true), err)
 end)
 
-test("worker: 30 random jobs, rebooted at random actions, end exactly as without reboots", function()
+test("worker: 30 random jobs, rebooted at random actions, end as without reboots", function()
   local NAMES = { [0] = "north", "east", "south", "west" }
   local DX, DZ = { [0] = 0, 1, 0, -1 }, { [0] = -1, 0, 1, 0 }
   for seed = 1, 30 do
@@ -1189,7 +1238,21 @@ test("worker: 30 random jobs, rebooted at random actions, end exactly as without
     local hl = (h0 + 3) % 4
     local allowed = { [sim.key(DX[hd], 31, DZ[hd])] = true } -- the door when digging down
     for k = 1, 2 do allowed[sim.key(k * DX[hl], 31, k * DZ[hl])] = true end -- the move's path
-    for _, k in ipairs(sim.dugLog) do truthy(box[k] or allowed[k], tag .. ": collateral dig at " .. k) end
+    -- <Claude> The one known exception (CLAUDE.md, "Resume"): a reboot right after a turn or
+    -- in the middle of a calibration while boxed in makes nav.init dig one block to measure
+    -- its heading. About 3% of these jobs; anything more, or a block not touching the box, fails.
+    local extra = {}
+    for _, k in ipairs(sim.dugLog) do if not (box[k] or allowed[k]) then extra[#extra + 1] = k end end
+    truthy(#extra <= 1, tag .. ": collateral digs at " .. table.concat(extra, " "))
+    if extra[1] then
+      local x, y, z = extra[1]:match("(-?%d+),(-?%d+),(-?%d+)")
+      x, y, z = tonumber(x), tonumber(y), tonumber(z)
+      local touches = false
+      for _, d in ipairs({ { 1, 0, 0 }, { -1, 0, 0 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, 0, 1 }, { 0, 0, -1 } }) do
+        touches = touches or box[sim.key(x + d[1], y + d[2], z + d[3])] or false
+      end
+      truthy(touches, tag .. ": collateral dig away from the box at " .. extra[1])
+    end
     eq(sim.t.x, 2 * DX[hl], tag) eq(sim.t.y, 31, tag) eq(sim.t.z, 2 * DZ[hl], tag) eq(sim.t.h, h0, tag .. ": facing")
   end
 end)
@@ -1296,13 +1359,19 @@ test("fleet: a turtle silent for two minutes that comes back is waited for", fun
 end)
 
 ---------------------------------------------------------------- refuel and update commands
--- shell.run and os.reboot for worker.lua and fleet.lua; runs records every shell.run.
-local function fakeShell(installOk)
+-- shell.run and os.reboot for worker.lua, fleet.lua and bot/dash.lua; runs records every
+-- shell.run. installed = the version a successful run leaves in /.version (nil: unchanged).
+local function fakeShell(installOk, installed)
   local runs = {}
-  _G.shell = { run = function(...) runs[#runs + 1] = table.concat({ ... }, " ") return installOk end }
+  _G.shell = { run = function(...)
+    runs[#runs + 1] = table.concat({ ... }, " ")
+    if installOk and installed then sim.files["/.version"] = textutils.serialiseJSON(installed) end
+    return installOk
+  end }
   os.reboot = function() error("REBOOT", 0) end
   return runs, function() _G.shell, os.reboot = nil, nil end
 end
+local SHA9 = "9999999abcdef0123456789abcdef0123456789a"
 
 test("worker: update reinstalls and reboots when idle; refuses while busy; reports a failed install", function()
   sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
@@ -1343,30 +1412,57 @@ test("worker: update reinstalls and reboots when idle; refuses while busy; repor
   runs = fakeShell(false)
   feed({ { type = "update" }, { type = "hello", quick = true } })
   _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
-  restore()
   eq(err, "SIM_IDLE", "still running")
   eq(sim.sent[2].msg.type, "updated") eq(sim.sent[2].msg.ok, false)
   eq(sim.sent[3].msg.type, "status", "answers again after a failed install")
+
+  -- the brain names its commit: installed, reported with its version, rebooted
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
+  runs = fakeShell(true, { n = 9, sha = SHA9 })
+  feed({ { type = "update", sha = SHA9, n = 9 } })
+  _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  eq(err, "REBOOT") eq(runs[1], "/install.lua " .. SHA9 .. " 9")
+  eq(sim.sent[2].msg.summary, "updated to v9 9999999, rebooting")
+
+  -- it already runs that commit: no reboot; every status says which version it runs
+  sim.reboot()
+  sim.sent = {}
+  runs = fakeShell(true, { n = 9, sha = SHA9 })
+  feed({ { type = "update", sha = SHA9, n = 9 }, { type = "hello", quick = true },
+         { type = "update", sha = "x; rm -rf", n = 1 } })
+  _, ok, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  restore()
+  eq(err, "SIM_IDLE", "no reboot")
+  eq(sim.sent[2].msg.summary, "already at v9 9999999")
+  eq(sim.sent[3].msg.version, "v9 9999999")
+  eq(runs[2], "/install.lua", "a bad sha is not passed on")
 end)
 
-test("fleet update: idle turtles update, busy and old ones are reported, then this computer installs", function()
+test("fleet update: this computer installs first, idle turtles get the same commit, busy and old ones are reported", function()
   sim.reset{}
   local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } },
                   [8] = { label = "b", pos = { x = 9, y = 31, z = 0 }, job = "x" },
                   [9] = { label = "c", pos = { x = 9, y = 31, z = 9 }, old = true } }
   fakeFleet(fakes)
-  local runs, restore = fakeShell(true)
+  local runs, restore = fakeShell(true, { n = 9, sha = SHA9 })
   local calls = fakeClient({})
   local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "update")
-  restore()
   truthy(ok, tostring(err)) eq(#calls, 0, "LLM calls")
-  eq(fakes[7].updated, true) eq(fakes[8].updated, nil) eq(fakes[9].updated, nil)
+  eq(#runs, 1) eq(runs[1], "/install.lua", "this computer: the newest commit")
+  eq(fakes[7].updated, SHA9, "the computer's commit") eq(fakes[8].updated, nil) eq(fakes[9].updated, nil)
   local text = table.concat(out, "\n")
-  truthy(text:find("#7 updated, rebooting", 1, true), text)
+  truthy(text:find("Updating 3 turtle(s) to v9 9999999", 1, true), text)
+  truthy(text:find("#7 updated to v9 9999999, rebooting", 1, true), text)
   truthy(text:find("#8 busy with job x, not updated", 1, true), text)
   truthy(text:find("#9 no answer", 1, true), text)
-  eq(#runs, 1) eq(runs[1], "/install.lua", "this computer last")
   truthy(sim.now >= 5 and sim.now < 30, "waited for the old worker: " .. sim.now)
+  -- the install fails here: no turtle is touched
+  fakes[7].updated = nil
+  fakeShell(false)
+  out, ok = quietly(assert(loadfile(REPO .. "fleet.lua")), "update")
+  restore()
+  truthy(ok) eq(fakes[7].updated, nil)
+  truthy(table.concat(out, "\n"):find("turtles left alone", 1, true), table.concat(out, "\n"))
 end)
 
 test("fleet refuel: one refuel step for idle turtles, no LLM call, nothing left to resume", function()
@@ -1393,8 +1489,118 @@ test("fleet refuel: one refuel step for idle turtles, no LLM call, nothing left 
   eq(#calls, 1)
 end)
 
+---------------------------------------------------------------- install.lua
+local INSTALLER = (function()
+  local f = assert(io.open(REPO .. "install.lua", "r"))
+  local text = f:read("*a")
+  f:close()
+  return text
+end)()
+
+-- GitHub as install.lua sees it: gh.commits = { { sha, message, date, installer } }, newest
+-- last. Every file of a commit reads "-- <path> @<sha>" except install.lua (the repo's own
+-- unless `installer` is set). gh.apiDown = the API refuses (rate limit). Returns the URLs fetched.
+local function fakeGitHub(gh)
+  local urls = {}
+  local function response(body, headers)
+    return { readAll = function() return body end, close = function() end,
+             getResponseHeaders = function() return headers or {} end }
+  end
+  _G.http = { get = function(url)
+    urls[#urls + 1] = url
+    if url:find("api.github.com", 1, true) then
+      if gh.apiDown then return nil, "Forbidden" end
+      local c, n = gh.commits[#gh.commits], #gh.commits
+      local body = textutils.serialiseJSON({ { sha = c.sha, commit = { message = c.message, committer = { date = c.date } } } })
+      return response(body, n > 1 and { Link = ('<https://api.github.com/x?per_page=1&page=2>; rel="next", '
+        .. '<https://api.github.com/x?per_page=1&page=%d>; rel="last"'):format(n) } or {})
+    end
+    local ref, path = url:match("^https://raw%.githubusercontent%.com/ManuelChastenay/cc%-turtle%-brain/([^/]+)/(.+)$")
+    for i = #gh.commits, 1, -1 do
+      local c = gh.commits[i]
+      if ref == c.sha or (ref == "main" and i == #gh.commits) then
+        return response(path == "install.lua" and (c.installer or INSTALLER) or ("-- " .. path .. " @" .. c.sha))
+      end
+    end
+    return nil, "Not Found"
+  end }
+  return urls
+end
+
+local function install(...)
+  local out, ok, err = quietly(assert(loadfile(REPO .. "install.lua")), ...)
+  return table.concat(out, "\n"), ok, err
+end
+
+test("install: prints the version, takes every file from that commit, skips what is installed", function()
+  sim.reset{}
+  local A, B, C = ("a"):rep(40), ("b"):rep(40), ("c"):rep(40)
+  local gh = { commits = { { sha = A, message = "first", date = "2026-10-01T10:00:00Z" },
+                           { sha = B, message = "Fleet update\n\nmore words", date = "2026-10-04T03:25:55Z" } } }
+  local urls = fakeGitHub(gh)
+  sim.files["/install.lua"] = INSTALLER
+  local out, ok, err = install()
+  truthy(ok, tostring(err))
+  truthy(out:find("Version v2 bbbbbbb (2026-10-04)\n  Fleet update\n", 1, true), out)
+  truthy(out:find("Done: v2 bbbbbbb installed.", 1, true), out)
+  eq(sim.files["/bot/version.lua"], "-- bot/version.lua @" .. B)
+  for _, u in ipairs(urls) do truthy(u:find("api.github.com", 1, true) or u:find("/" .. B .. "/", 1, true), "not pinned: " .. u) end
+  local v = textutils.unserialiseJSON(sim.files["/.version"])
+  eq(v.n, 2) eq(v.sha, B) eq(v.message, "Fleet update") eq(v.date, "2026-10-04 03:25 UTC")
+  -- nothing new: one API call, nothing downloaded
+  local before = #urls
+  out = install()
+  eq(#urls, before + 1) truthy(out:find("Already up to date (v2 bbbbbbb)", 1, true), out)
+  before = #urls
+  install("force")
+  truthy(#urls > before + 10, "force downloads again")
+  -- a new commit: installed, saying what it replaced
+  gh.commits[3] = { sha = C, message = "third", date = "2026-10-05T00:00:00Z" }
+  out = install()
+  truthy(out:find("Done: v3 ccccccc installed (was v2 bbbbbbb).", 1, true), out)
+  -- a commit given (fleet update): no API call
+  before = #urls
+  out = install(A, "1")
+  for i = before + 1, #urls do eq(urls[i]:find("api.github.com", 1, true), nil, "API call") end
+  eq(sim.files["/bot/nav.lua"], "-- bot/nav.lua @" .. A)
+  truthy(out:find("Done: v1 aaaaaaa installed (was v3 ccccccc).", 1, true), out)
+  -- the API does not answer: the branch, version unknown
+  gh.apiDown = true
+  out = install()
+  truthy(out:find("version unknown", 1, true), out)
+  eq(sim.files["/bot/nav.lua"], "-- bot/nav.lua @" .. C, "the branch's files")
+  eq(sim.files["/.version"], nil, "no version saved")
+  out, ok, err = install("bogus")
+  _G.http = nil
+  eq(ok, false) truthy(tostring(err):find("usage", 1, true), tostring(err))
+end)
+
+test("install: a changed installer hands over to its new copy, with the same arguments", function()
+  sim.reset{}
+  local A, B = ("a"):rep(40), ("b"):rep(40)
+  fakeGitHub({ commits = { { sha = A, message = "first" }, { sha = B, message = "second" } } })
+  sim.files["/install.lua"] = "-- an older installer"
+  local handed
+  _G.shell = { run = function(path, ...)
+    handed = { ... }
+    eq(path, "/install.lua") eq(sim.files["/install.lua"], INSTALLER, "the new copy is saved first")
+    return (pcall(assert(loadfile(REPO .. "install.lua")), ...))
+  end }
+  local out, ok, err = install(A, "1")
+  truthy(ok, tostring(err))
+  truthy(out:find("Installer updated, restarting it", 1, true), out)
+  eq(table.concat(handed, " "), "--updated " .. A .. " 1")
+  eq(textutils.unserialiseJSON(sim.files["/.version"]).sha, A)
+  -- the new copy fails: so does the old one, so worker.lua's update sees it
+  sim.files["/install.lua"], sim.files["/.version"] = "-- an older installer", nil
+  _G.shell = { run = function() return false end }
+  out, ok = install()
+  _G.shell, _G.http = nil, nil
+  eq(ok, false)
+end)
+
 ---------------------------------------------------------------- dashboard (bot/ui, bot/registry, bot/dash)
-local helpers = { fakeClient = fakeClient, fakeFleet = fakeFleet, quietly = quietly }
+local helpers = { fakeClient = fakeClient, fakeFleet = fakeFleet, quietly = quietly, fakeShell = fakeShell }
 for _, file in ipairs({ "ui_tests.lua", "registry_tests.lua", "dash_tests.lua" }) do
   local path = SIM_DIR .. file
   local f = io.open(path, "r")

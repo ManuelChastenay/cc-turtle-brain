@@ -11,10 +11,10 @@ install
 edit /.openrouter_key
 ```
 Then: `brain <goal>`, e.g. `brain mine a 6x6 area 3 deep north of here, then come home`.
-Update later with `install`. `brain refuel` burns everything in the inventory that burns (coal, wood...), with no LLM call.
+Update later with `install`. It prints the version it installs, e.g. `Version v8 d2ffe09 (2026-10-04)` and the commit message: v8 = the 8th commit on main (higher is newer), d2ffe09 = the commit. Every file comes from that one commit. Already up to date: nothing is downloaded (`install force` downloads it again). `install <commit>` installs a given commit. `brain refuel` burns everything in the inventory that burns (coal, wood...), with no LLM call.
 
 - A mining turtle needs a pickaxe; give it coal (it refuels by itself). Before unloading into a chest it burns whatever burns (coal, planks, logs...) up to its fuel limit, then keeps one stack of fuel. To turn fuel off entirely, set `need_fuel = false` under `[turtle]` in the server's `computercraft-server.toml` and restart.
-- Junk never goes into your chests: cobblestone and mossy cobblestone (with their stairs, slabs and walls), dirt, gravel, deepslate, andesite, raw copper… (the list is in `bot/config.lua`, exact names) is dropped on the ground when the inventory fills, at the end of each dig and before unloading. Ores are kept. Make the list `{}` to keep everything.
+- Junk never goes into your chests: cobblestone and mossy cobblestone (with their stairs, slabs and walls), dirt, gravel, deepslate, andesite, raw copper… (the list is in `bot/config.lua`, exact names) is dropped into the hole after every mined cell, and before unloading. Each drop takes as long as a move, so digging is about 20% slower than keeping it until the inventory fills. Ores are kept. Make the list `{}` to keep everything.
 - With a wireless modem and GPS it knows its real position and facing (it steps 1 block and back at startup to check).
 - Put a chest next to where it starts, or next to home, so it can unload when full. Home is where it first ran; `brain set home here` changes it.
 - Chests, barrels, computers, glass, doors and beds are never dug (`bot/config.lua`).
@@ -28,7 +28,7 @@ One computer plans, the turtles work in parallel.
 2. The brain computer: a modem (ender modems avoid range problems), `install`, `edit /.openrouter_key`, and `edit startup.lua` with `shell.run("fleet resume")`.
 3. On the computer: `fleet <goal>`, e.g. `fleet all turtles dig out x 100 to 131, z 40 to 55, y 60 to 50, then go home`.
 
-Without the LLM: `fleet refuel` (or `fleet refuel 3 5`) makes the idle turtles burn everything that burns. `fleet update` makes every idle turtle reinstall the code from GitHub and reboot into it, then updates the computer too. Turtles installed before `update` existed need `install` by hand once.
+Without the LLM: `fleet refuel` (or `fleet refuel 3 5`) makes the idle turtles burn everything that burns. `fleet update` installs the newest commit on the computer, then every idle turtle installs that same commit and reboots into it (`#7 updated to v9 1a2b3c4, rebooting`). Turtles installed before `update` existed need `install` by hand once.
 
 A shared dig (`mineBox`) is cut into one slice per turtle, nearest slice to each. Other steps go to every turtle in the group. When two turtles meet, the one with the higher computer id steps aside and lets the other pass; an idle turtle in the way is asked to move. Turtles answer the brain while they work. Ctrl+T on the computer stops every turtle still working.
 
@@ -38,10 +38,11 @@ A shared dig (`mineBox`) is cut into one slice per turtle, nearest slice to each
 A screen for the fleet, on the brain computer: `fleet dash` (or `shell.run("fleet dash")` in its `startup.lua` instead of `fleet resume`; it picks up a saved job by itself).
 
 - Put an **advanced monitor** next to the computer (a 4x3 or bigger works well; the dashboard sets text scale 0.5). It lists every turtle with its state (BUSY / idle / LOST), position, fuel and current step, and the recent events. Touch **[STOP ALL]**, **[HOME ALL]**, **[REFUEL ALL]** or a busy turtle's **[stop]**. Without a monitor it uses the computer's own screen.
-- Type on the computer: plain text is a goal for the LLM, like `fleet <goal>`. Lines starting with `/` run at once with no LLM call: `/stop` (all turtles and the goal) or `/stop 3`, `/home` (stop everything, then all turtles go home) or `/home 3`, `/refuel` or `/refuel 3` (idle turtles burn what burns), `/update` or `/update 3` (idle turtles reinstall from GitHub and reboot), `/resume`, `/scale 1` (monitor text scale), `/clear`, `/exit` (back to the computer's shell), `/help`.
+- Type on the computer: plain text is a goal for the LLM, like `fleet <goal>`. Lines starting with `/` run at once with no LLM call: `/stop` (all turtles and the goal) or `/stop 3`, `/home` (stop everything, then all turtles go home) or `/home 3`, `/refuel` or `/refuel 3` (idle turtles burn what burns), `/update` or `/update 3` (like `fleet update`), `/resume`, `/scale 1` (monitor text scale), `/clear`, `/exit` (back to the computer's shell), `/help`.
 - Turtles are polled every 5 s, so the screen stays current between jobs. A turtle silent for 60 s shows as LOST.
 - `/exit` (or Ctrl+T) quits the dashboard only and gives you the computer's shell back. The turtles keep working and the job is waited for again the next time `fleet dash` starts.
-- `/update` does not update the computer itself (it is running the code): `/exit`, `install`, `fleet dash`. Or `/exit` and `fleet update`, which does the turtles and the computer.
+- Versions: the log shows this computer's version at start and each turtle's when it joins (`#7 miner-1 joined, v8 d2ffe09`) or comes back from an update (`#7 now runs v9 1a2b3c4`).
+- `/update` installs on the computer first (the installer's output shows on the terminal for a moment), then on the turtles. The dashboard keeps running its old code until you `/exit` and start `fleet dash` again.
 
 ## Tests (dev machine)
 ```

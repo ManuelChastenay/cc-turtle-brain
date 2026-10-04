@@ -6,7 +6,7 @@
   so it tests in a fake world and the same table can be shared with
   bot/fleet.lua (`turtles`).
     record = { id, label, state = "<status line>", pos, job, fuel,
-               step, steps, text, seen }
+               step, steps, text, seen, version }
   `state` is the status text the planner reads (as fleet.discover gives it).
   What the screen shows (idle / busy / lost) comes from M.mode().
 ]]
@@ -49,6 +49,8 @@ function M.new(opts)
     local rec = get(from)
     rec.seen = now
     if t == "status" then
+      local before = rec.version
+      rec.version = msg.version or rec.version -- "v8 d2ffe09"; workers older than versions send none
       rec.label, rec.state, rec.pos, rec.fuel = msg.label or rec.label, msg.state or rec.state, msg.pos or rec.pos, msg.fuel
       rec.job = msg.job
       if msg.job then
@@ -56,7 +58,11 @@ function M.new(opts)
       else
         rec.step, rec.steps = nil, nil
       end
-      if not known then reg.note(("#%d %s joined"):format(from, rec.label or "unlabeled"), now) end
+      if not known then
+        reg.note(("#%d %s joined%s"):format(from, rec.label or "unlabeled", rec.version and (", " .. rec.version) or ""), now)
+      elseif before and rec.version ~= before then
+        reg.note(("#%d now runs %s"):format(from, rec.version), now) -- back from an update
+      end
     elseif t == "progress" then
       rec.job, rec.step, rec.steps, rec.text = msg.job, msg.step, msg.steps or rec.steps, msg.text
       reg.note(("#%d [%s] %s"):format(from, tostring(msg.step), tostring(msg.text)), now)

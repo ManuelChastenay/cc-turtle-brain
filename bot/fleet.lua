@@ -241,17 +241,19 @@ function M.runSteps(skills, turtles, ids, steps, onEvent, goal)
   return result
 end
 
--- <Claude> Has the turtles in ids reinstall their code from GitHub: the
+-- <Claude> Has the turtles in ids install `target` ({ n, sha } from
+-- bot/version.lua: the commit this computer runs, so the whole fleet runs
+-- one commit and GitHub's API is asked once; nil = each the newest). The
 -- worker runs /install.lua and reboots into it (a busy one refuses). One
 -- that does not answer within UPDATE_ACK s runs a worker from before
 -- `update` existed: run `install` on it by hand once. onEvent(id, msg) sees
 -- `updating` and `updated`. Returns { [id] = { ok, summary | error } } for M.outcome.
-function M.update(ids, onEvent)
+function M.update(ids, target, onEvent)
   onEvent = onEvent or function() end
   local start, waiting, results = os.clock(), {}, {}
   for _, id in ipairs(ids) do
     waiting[id] = "asked"
-    net.send(id, { type = "update" })
+    net.send(id, { type = "update", sha = target and target.sha, n = target and target.n })
   end
   while next(waiting) do
     local from, msg = rednet.receive(net.PROTOCOL, 1)
