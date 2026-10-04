@@ -16,6 +16,7 @@ return {
     "minecraft:cobbled_deepslate", "minecraft:dirt", "minecraft:gravel",
     "minecraft:andesite", "minecraft:diorite", "minecraft:granite", "minecraft:tuff", "minecraft:netherrack",
     "minecraft:raw_copper",
+    "xycraft_world:kivi",
   },
   protect    = {                  -- never dug, even when in the way
     "computercraft:", "chest", "barrel", "shulker_box", "furnace", "_door", "glass", "_bed",

@@ -2,7 +2,9 @@
   Installs/updates the brain files from GitHub.
     install            the newest commit on main
     install force      the same, downloaded again even if already installed
-    install <sha> [n]  that commit (`fleet update` sends the turtles the computer's)
+    install <sha>      that commit (short sha like d2ffe09, or full)
+    install <sha> <n>  a full sha and its n: no API call (`fleet update` sends
+                       the turtles the computer's)
   The version is printed and saved in /.version: { n, sha, date, message }
   (date and message only when the commit was looked up). n counts the
   commits on main up to that one, so a higher n is newer: "v8 d2ffe09".
@@ -35,7 +37,7 @@ for _, a in ipairs(args) do
   if a == "force" then force = true
   elseif #a >= 7 and a:match("^%x+$") then pin = a:lower()
   elseif tonumber(a) then pinN = tonumber(a)
-  else error("usage: install [force]   or   install <commit sha> [n]", 0) end
+  else error("usage: install [force]   or   install <commit sha>", 0) end
 end
 
 local function readJSON(path)
@@ -69,13 +71,14 @@ local function fetch(path, ref)
   return http.get(("https://raw.githubusercontent.com/%s/%s/%s/%s"):format(OWNER, REPO, ref, path))
 end
 
--- <Claude> The newest commit on the branch: { n, sha, date, message }, or nil.
--- With one commit per page, the last page in the Link header is the number
--- of commits (no Link header: there is only one).
-local function newest()
+-- <Claude> The commit ref names (the branch's newest, or a sha, short ones
+-- too): { n, sha, date, message }, or nil. With one commit per page, the
+-- last page in the Link header is the number of commits up to that one
+-- (no Link header: it is the first).
+local function lookup(ref)
   local headers = { ["Accept"] = "application/vnd.github+json", ["User-Agent"] = "cc-installer" }
   if token then headers["Authorization"] = "Bearer " .. token end
-  local res = http.get(("https://api.github.com/repos/%s/%s/commits?sha=%s&per_page=1"):format(OWNER, REPO, BRANCH), headers)
+  local res = http.get(("https://api.github.com/repos/%s/%s/commits?sha=%s&per_page=1"):format(OWNER, REPO, ref), headers)
   if not res then return nil end
   local list = textutils.unserialiseJSON(res.readAll())
   local n = 1
@@ -99,7 +102,20 @@ end
 
 print(token and "Mode: private (GitHub API)" or "Mode: public (raw)")
 
-local target = pin and { n = pinN, sha = pin } or newest()
+-- <Claude> Files are fetched by full sha (raw.githubusercontent.com refuses
+-- short ones), so a given commit is looked up too, unless `fleet update`
+-- already sent its full sha and n.
+local target
+if pin and pinN and #pin == 40 then
+  target = { n = pinN, sha = pin }
+elseif pin then
+  target = lookup(pin) or (#pin == 40 and { n = pinN, sha = pin }) or nil
+  if not target then
+    error(("commit %s not found, or GitHub's API did not answer: try its full 40-character sha"):format(pin), 0)
+  end
+else
+  target = lookup(BRANCH)
+end
 if target then
   print(("Version %s%s"):format(text(target), target.date and (" (" .. target.date:sub(1, 10) .. ")") or ""))
   if target.message and target.message ~= "" then print("  " .. target.message) end

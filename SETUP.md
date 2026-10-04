@@ -54,7 +54,7 @@ install
 ```
 - **Label every turtle.** An unlabeled turtle loses its files when broken. The label also shows in the fleet roster.
 - `install` downloads all 19 files and updates itself first, so new files arrive in one run. Re-run `install` to update.
-- It prints the version: `Version v8 d2ffe09 (2026-10-04)` plus the commit message. `v8` counts the commits on main (higher is newer), `d2ffe09` is the commit. All files come from that commit, and the version is saved in `/.version`. If it is already installed, nothing is downloaded (`install force` downloads it again). `install <commit sha>` installs a given commit.
+- It prints the version: `Version v8 d2ffe09 (2026-10-04)` plus the commit message. `v8` counts the commits on main (higher is newer), `d2ffe09` is the commit. All files come from that commit, and the version is saved in `/.version`. If it is already installed, nothing is downloaded (`install force` downloads it again). `install <commit sha>` installs a given commit; the short id from the version line works (one API call to find the full one).
 - Finding the newest commit costs one GitHub API call. Without a token the limit is 60 calls an hour for the whole server IP. If GitHub refuses, `install` still works from the branch and says `version unknown`.
 - Fleet turtles can be updated from the brain computer instead: `fleet update` (or `/update` in the dashboard). The computer installs the newest commit first, then each turtle installs that same commit (no API call on the turtles) and reboots. In private-repo mode every turtle still needs `/.github_token`. A turtle installed before this command existed must run `install` by hand once.
 - The raw URL of the branch can serve stale files for about 5 minutes after a push. That only matters for `wget` and for installers older than versions; `install` itself downloads by commit.
@@ -168,7 +168,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | `fuelItems` | coal, coke, lava_bucket, blaze_rod, dried_kelp_block | Burned for fuel (substring match) |
 | `keepFuel` | 64 | Fuel items kept when unloading (none if fuel is unlimited) |
 | `fuelMargin` | 20 | Extra fuel kept on top of a job's need |
-| `junk` | cobblestone and mossy cobblestone (+ stairs, slab, wall), cobbled deepslate, dirt, gravel, andesite, diorite, granite, tuff, netherrack, raw copper | Exact names. Never stored: dropped into the hole after every mined cell (about 20% slower digging), after a trip that dug through something, and before unloading. `{}` keeps everything. |
+| `junk` | cobblestone and mossy cobblestone (+ stairs, slab, wall), cobbled deepslate, dirt, gravel, andesite, diorite, granite, tuff, netherrack, raw copper, `xycraft_world:kivi` | Exact names. Never stored: dropped into the hole after every mined cell (about 20% slower digging), after a trip that dug through something, and before unloading. `{}` keeps everything. |
 | `protect` | `computercraft:`, chest, barrel, shulker_box, furnace, `_door`, glass, `_bed` | Never dug, even in the way |
 | `turtleWaits` | 20 | About 1 s retries when another turtle blocks the way |
 | `maxSteps` | 20 | Longest plan accepted |

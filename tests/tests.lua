@@ -1499,7 +1499,9 @@ end)()
 
 -- GitHub as install.lua sees it: gh.commits = { { sha, message, date, installer } }, newest
 -- last. Every file of a commit reads "-- <path> @<sha>" except install.lua (the repo's own
--- unless `installer` is set). gh.apiDown = the API refuses (rate limit). Returns the URLs fetched.
+-- unless `installer` is set). Like the real thing, the API finds commits by short sha too,
+-- raw file URLs only by full sha or branch. gh.apiDown = the API refuses (rate limit).
+-- Returns the URLs fetched.
 local function fakeGitHub(gh)
   local urls = {}
   local function response(body, headers)
@@ -1510,7 +1512,11 @@ local function fakeGitHub(gh)
     urls[#urls + 1] = url
     if url:find("api.github.com", 1, true) then
       if gh.apiDown then return nil, "Forbidden" end
-      local c, n = gh.commits[#gh.commits], #gh.commits
+      local ref, c, n = url:match("[?&]sha=([^&]+)"), nil, nil
+      for i, commit in ipairs(gh.commits) do
+        if (ref == "main" and i == #gh.commits) or commit.sha:sub(1, #ref) == ref then c, n = commit, i end
+      end
+      if not c then return nil, "Not Found" end
       local body = textutils.serialiseJSON({ { sha = c.sha, commit = { message = c.message, committer = { date = c.date } } } })
       return response(body, n > 1 and { Link = ('<https://api.github.com/x?per_page=1&page=2>; rel="next", '
         .. '<https://api.github.com/x?per_page=1&page=%d>; rel="last"'):format(n) } or {})
@@ -1564,8 +1570,22 @@ test("install: prints the version, takes every file from that commit, skips what
   for i = before + 1, #urls do eq(urls[i]:find("api.github.com", 1, true), nil, "API call") end
   eq(sim.files["/bot/nav.lua"], "-- bot/nav.lua @" .. A)
   truthy(out:find("Done: v1 aaaaaaa installed (was v3 ccccccc).", 1, true), out)
-  -- the API does not answer: the branch, version unknown
+  -- a short sha, as the version line shows it: looked up, files fetched by the full one
+  out, ok, err = install("bbbbbbb")
+  truthy(ok, tostring(err))
+  eq(sim.files["/bot/nav.lua"], "-- bot/nav.lua @" .. B)
+  truthy(out:find("Version v2 bbbbbbb (2026-10-04)", 1, true) and out:find("(was v1 aaaaaaa)", 1, true), out)
+  eq(textutils.unserialiseJSON(sim.files["/.version"]).sha, B)
+  out, ok, err = install("0123456")
+  eq(ok, false) truthy(tostring(err):find("commit 0123456 not found", 1, true), tostring(err))
+  -- the API does not answer: a full sha still installs, a short one cannot
   gh.apiDown = true
+  out, ok, err = install(C)
+  truthy(ok, tostring(err)) eq(sim.files["/bot/nav.lua"], "-- bot/nav.lua @" .. C)
+  truthy(out:find("Done: v? ccccccc installed", 1, true), out)
+  out, ok = install("ccccccc")
+  eq(ok, false)
+  -- nor does the branch's newest: the branch, version unknown
   out = install()
   truthy(out:find("version unknown", 1, true), out)
   eq(sim.files["/bot/nav.lua"], "-- bot/nav.lua @" .. C, "the branch's files")
