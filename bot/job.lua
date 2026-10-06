@@ -4,11 +4,15 @@
   being run, that step's checkpoint (e.g. how far mineArea got) and the
   results so far. When the job ends, its result message moves to
   /job_result.json and stays there until the brain acknowledges it, so a
-  brain that was down can still collect it.
+  brain that was down can still collect it. A job that did not finish
+  (stopped, or a step failed) moves to /job_last.json with its step and
+  checkpoint, until a `retry` carries on with it (or another job is stopped
+  or fails); jobs that finish in between leave it alone, so a dig can be
+  stopped, sent home, then retried.
 ]]
 local M = {}
 
-local JOB, RESULT = "/job.json", "/job_result.json"
+local JOB, RESULT, LAST = "/job.json", "/job_result.json", "/job_last.json"
 
 local function read(path)
   local f = fs.open(path, "r")
@@ -27,6 +31,8 @@ end
 function M.load() return read(JOB) end
 function M.result() return read(RESULT) end
 function M.clearResult() fs.delete(RESULT) end
+function M.last() return read(LAST) end
+function M.canRetry() return fs.exists(LAST) end
 
 -- <Claude> Saves a new job and returns its record.
 function M.start(id, boss, steps)
@@ -35,7 +41,17 @@ function M.start(id, boss, steps)
   return record
 end
 
+-- <Claude> The last job that did not finish (M.last()) is the current job
+-- again, under a new id and boss, from the step and checkpoint it stopped at.
+function M.retry(record, id, boss)
+  record.id, record.boss = id, boss
+  write(JOB, record)
+  fs.delete(LAST)
+  return record
+end
+
 -- <Claude> The journal plan.run saves progress through (see bot/plan.lua).
+-- A failed step keeps its step number and checkpoint, for a retry.
 function M.journal(record)
   return {
     step = record.step, state = record.state, results = record.results,
@@ -48,15 +64,19 @@ function M.journal(record)
       write(JOB, record)
     end,
     finish = function(i, result)
-      record.results[i], record.step, record.state = result, i + 1, nil
+      record.results[i] = result
+      if result.ok then record.step, record.state = i + 1, nil end
       write(JOB, record)
     end,
   }
 end
 
--- <Claude> The job is over: keep its result message until acknowledged.
+-- <Claude> The job is over: keep its result message until acknowledged, and
+-- the job itself for a retry if it did not finish.
 function M.finish(result)
   write(RESULT, result)
+  local record = not result.ok and read(JOB)
+  if record then write(LAST, record) end
   fs.delete(JOB)
 end
 

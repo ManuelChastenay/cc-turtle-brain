@@ -5,9 +5,13 @@
   if some turtle failed, once all have finished. Ctrl+T stops every turtle
   that is still working. After this computer reboots, `fleet resume` waits
   for the job again (put it in startup.lua).
-  No LLM call: `fleet refuel [ids]` (idle turtles burn what burns) and
-  `fleet update` (this computer installs the newest commit, then the turtles
-  install the same one and reboot).
+  No LLM call: `fleet do <steps>` (the idle turtles run typed steps, shared
+  ones split between them: `fleet do mineBox 0 60 0 31 50 15; goHome`;
+  `fleet do` lists the skills), `fleet retry [ids]` (idle turtles carry on
+  with the job they stopped or failed, from its last checkpoint),
+  `fleet refuel [ids]` (idle turtles burn what burns) and `fleet update`
+  (this computer installs the newest commit, then the turtles install the
+  same one and reboot).
 ]]
 local agent = require("llm.agent")
 local plan = require("bot.plan")
@@ -22,10 +26,10 @@ of turtles (by id) the steps they run. Turtles work on their own and in
 parallel; you only hear back, once all are done, if something failed: then
 you get each turtle's outcome and fresh state, and either send plans for the
 remaining work or reply with one line saying why it cannot be done.
-A turtle can be in one plan only. In a plan with several turtles, mineBox and
-mineCircle are split between them (each digs a share) and every other step is
-done by each of them. Use world coordinates (mineBox, mineCircle, goTo) for
-shared work; mineArea and
+A turtle can be in one plan only. In a plan with several turtles, mineBox,
+mineCircle, mineSphere, buildSphere and buildBox are split between them (each
+does a share) and every other step is done by each of them. Use world
+coordinates (those skills, goTo) for shared work; mineArea and
 move are relative to each turtle. Lua already handles paths, digging through
 obstacles, fuel and unloading. Read positions, fuel and inventories from the
 Turtles list. If the goal is only a question, or no skill can do it, reply in
@@ -88,7 +92,7 @@ if goal == "resume" then
   for id in pairs(saved.pending) do turtles[id] = turtles[id] or { label = "?", state = "no answer yet" } end
   local text, failed = fleet.outcome(fleet.wait(saved, turtles, onEvent))
   print(text)
-  if failed == 0 then fleet.clearRun() return end
+  if failed == 0 or saved.manual then fleet.clearRun() return end -- `fleet retry` carries on without the LLM
   goal = tostring(saved.goal) .. "\nThis job was interrupted, then resumed. Outcome per turtle:\n" .. text
     .. "\nPlan only the work that is left, or reply in one line."
 elseif saved then
@@ -96,21 +100,44 @@ elseif saved then
   fleet.clearRun()
 end
 
--- <Claude> `fleet refuel` or `fleet refuel 3 5`: one refuel step for the idle turtles.
-local refuelIds = goal:match("^refuel([%d%s]*)$")
-if refuelIds then
+local function report(r) print(r.ok and r.summary or r.error .. (r.results and ("\n" .. r.results) or "")) end
+
+-- <Claude> `fleet do <steps>`: typed steps for every idle turtle, as one group
+-- (mineBox, mineSphere, builds... split between them), no LLM call.
+local typed = goal:match("^do%s+(.+)$")
+if goal == "do" then
+  print("fleet do skill args; skill args; ...  (bare values in order, or name=value)")
+  print(plan.catalog(skills.list, true))
+  return
+elseif typed then
+  local steps, err = plan.parse(typed, skills.list)
+  if not steps then error(err, 0) end
+  print("Looking for turtles...")
+  local turtles = fleet.discover(2)
+  local ids, busy = fleet.idle(turtles)
+  if busy > 0 then print(("%d busy turtle(s) left alone"):format(busy)) end
+  if #ids == 0 then print("No idle turtle.") return end
+  report(fleet.runSteps(skills.list, turtles, ids, steps, onEvent, typed))
+  return
+end
+
+-- <Claude> `fleet refuel` or `fleet refuel 3 5`: one refuel step for the idle
+-- turtles. `fleet retry [ids]`: idle turtles carry on with their stopped or
+-- failed job from its last checkpoint.
+local command, idText = goal:match("^(%a+)([%d%s]*)$")
+if command == "refuel" or command == "retry" then
   local only
-  for id in refuelIds:gmatch("%d+") do
+  for id in idText:gmatch("%d+") do
     only = only or {}
     only[tonumber(id)] = true
   end
   print("Looking for turtles...")
   local turtles = fleet.discover(2)
+  if command == "retry" then report(fleet.retry(turtles, only, onEvent)) return end
   local ids, busy = fleet.idle(turtles, only)
   if busy > 0 then print(("%d busy turtle(s) left alone"):format(busy)) end
   if #ids == 0 then print("No idle turtle to refuel.") return end
-  local r = fleet.runSteps(skills.list, turtles, ids, { { skill = "refuel" } }, onEvent, "refuel")
-  print(r.ok and r.summary or r.error .. (r.results and ("\n" .. r.results) or ""))
+  report(fleet.runSteps(skills.list, turtles, ids, { { skill = "refuel" } }, onEvent, "refuel"))
   return
 end
 
@@ -122,10 +149,10 @@ if next(turtles) == nil then error("no turtle answered: run `worker` on them", 0
 local roster = fleet.describe(turtles)
 print(roster)
 
-local runPlans = fleet.tool(skills.list, turtles, onEvent, goal)
+local runPlans = fleet.tool(skills.list, turtles, onEvent, goal, print)
 local text, stats = agent.run(goal .. "\nTurtles:\n" .. roster, { runPlans = runPlans }, SYSTEM, function(name, result)
   if not result.ok then printError(("> %s: %s"):format(name, tostring(result.error))) end
-end)
+end, nil, print)
 
 if text then
   fleet.clearRun()

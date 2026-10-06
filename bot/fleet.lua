@@ -6,7 +6,8 @@
   message is expected. The job in flight is saved (/fleet_job.json), so
   `fleet resume` can wait for it again after the computer reboots. Ctrl+T
   while waiting stops every busy turtle. Also the no-LLM commands
-  (runSteps: /home, /refuel; update: reinstall the workers' code).
+  (runSteps: do, /home, /refuel; retry: carry on stopped or failed jobs;
+  update: reinstall the workers' code).
   Protocol: bot/net.lua.
 ]]
 local plan = require("bot.plan")
@@ -81,15 +82,16 @@ local function expand(plans, skills, turtles)
 end
 
 -- <Claude> The job in flight, saved so `fleet resume` can pick it up after
--- the brain computer reboots: { goal, job, pending = { ids }, results =
--- { ["id"] = result } } (JSON object keys must be strings). In memory,
--- pending is a set and results are keyed by number.
+-- the brain computer reboots: { goal, job, manual, pending = { ids }, results =
+-- { ["id"] = result } } (JSON object keys must be strings). manual = sent
+-- without the LLM (do, retry, home...): a resume only reports its failures.
+-- In memory, pending is a set and results are keyed by number.
 local function saveRun(run)
   local pending, results = {}, {}
   for id in pairs(run.pending) do pending[#pending + 1] = id end
   for id, result in pairs(run.results) do results[tostring(id)] = result end
   local f = fs.open(RUN_PATH, "w")
-  f.write(textutils.serialiseJSON({ goal = run.goal, job = run.job, pending = pending, results = results }))
+  f.write(textutils.serialiseJSON({ goal = run.goal, job = run.job, manual = run.manual, pending = pending, results = results }))
   f.close()
 end
 
@@ -99,7 +101,7 @@ function M.loadRun()
   local data = textutils.unserialiseJSON(f.readAll())
   f.close()
   if type(data) ~= "table" or not data.job then return nil end
-  local run = { goal = data.goal, job = data.job, pending = {}, results = {} }
+  local run = { goal = data.goal, job = data.job, manual = data.manual, pending = {}, results = {} }
   for _, id in ipairs(data.pending or {}) do run.pending[id] = true end
   for id, result in pairs(data.results or {}) do run.results[tonumber(id)] = result end
   return run
@@ -187,11 +189,39 @@ function M.outcome(results)
   return table.concat(lines, "\n"), failed, #lines
 end
 
+-- <Claude> Sends each turtle in msgs ({ [id] = { steps } or { retry = true } })
+-- its part of one new job, waits for all of them and returns the runPlans
+-- result. The job is saved before anything is sent: a reboot right after
+-- must still know about it.
+local function launch(msgs, turtles, onEvent, goal, manual)
+  local run = { goal = goal, job = os.getComputerID() .. "-" .. os.epoch("utc"), manual = manual, pending = {}, results = {} }
+  for id in pairs(msgs) do run.pending[id] = true end
+  saveRun(run)
+  for id, msg in pairs(msgs) do
+    msg.type, msg.job = "plan", run.job
+    net.send(id, msg)
+  end
+  local text, failed, count = M.outcome(M.wait(run, turtles, onEvent))
+  if failed == 0 then
+    return { ok = true, summary = count > 0 and text or "No turtle had anything to do." }
+  end
+  return { ok = false, error = ("%d of %d turtles failed"):format(failed, count), results = text, state = M.describe(turtles) }
+end
+
+local function stepsOnly(work)
+  local msgs = {}
+  for id, steps in pairs(work) do
+    if #steps > 0 then msgs[id] = { steps = steps } end
+  end
+  return msgs
+end
+
 -- <Claude> The runPlans tool for llm/agent.lua. `final` like runPlan: if
 -- every turtle succeeds, the run ends with a Lua-written summary. Otherwise
 -- the model gets each turtle's outcome and the fleet's fresh state.
--- goal is saved with the job for `fleet resume`.
-function M.tool(skills, turtles, onEvent, goal)
+-- goal is saved with the job for `fleet resume`. log(text), optional, hears
+-- each plan the model sends ("plan for #7,8: mineBox ...; goHome").
+function M.tool(skills, turtles, onEvent, goal, log)
   return {
     description = "Send plans to groups of turtles. They run in parallel; nothing is reported back unless a turtle fails.",
     parameters = { type = "object", required = { "plans" }, properties = {
@@ -204,17 +234,12 @@ function M.tool(skills, turtles, onEvent, goal)
     handler = function(a)
       local work, err = expand(a.plans, skills, turtles)
       if not work then return { ok = false, error = "plans rejected, nothing ran: " .. err } end
-      local run = { goal = goal, job = os.getComputerID() .. "-" .. os.epoch("utc"), pending = {}, results = {} }
-      for id, steps in pairs(work) do
-        if #steps > 0 then run.pending[id] = true end
+      for _, group in ipairs(log and a.plans or {}) do
+        local text = {}
+        for i, step in ipairs(plan.check(group.steps, skills)) do text[i] = plan.format(step) end
+        log(("plan for #%s: %s"):format(table.concat(group.turtles, ","), table.concat(text, "; ")))
       end
-      saveRun(run) -- before sending: a reboot right after must still know about the job
-      for id in pairs(run.pending) do net.send(id, { type = "plan", job = run.job, steps = work[id] }) end
-      local text, failed, count = M.outcome(M.wait(run, turtles, onEvent))
-      if failed == 0 then
-        return { ok = true, summary = count > 0 and text or "No turtle had anything to do." }
-      end
-      return { ok = false, error = ("%d of %d turtles failed"):format(failed, count), results = text, state = M.describe(turtles) }
+      return launch(stepsOnly(work), turtles, onEvent, goal, false)
     end,
   }
 end
@@ -231,12 +256,30 @@ function M.idle(turtles, only)
   return ids, busy
 end
 
--- <Claude> The same steps for every turtle in ids, with no LLM call (the
--- dashboard's /home and /refuel, `fleet refuel`). Waits like runPlans, then
--- forgets the job: a later resume must not ask the LLM about it. Returns the
+-- <Claude> The same steps for the turtles in ids as one group, with no LLM
+-- call (`fleet do`, `fleet refuel`, the dashboard's /do, /home, /refuel):
+-- shared steps (mineBox, mineSphere, builds...) are split between them like
+-- in an LLM plan. Waits like runPlans, then forgets the job. Returns the
 -- runPlans result ({ ok, summary } | { ok = false, error, results }).
 function M.runSteps(skills, turtles, ids, steps, onEvent, goal)
-  local result = M.tool(skills, turtles, onEvent, goal).handler({ plans = { { turtles = ids, steps = steps } } })
+  local work, err = expand({ { turtles = ids, steps = steps } }, skills, turtles)
+  if not work then return { ok = false, error = "plans rejected, nothing ran: " .. err } end
+  local result = launch(stepsOnly(work), turtles, onEvent, goal, true)
+  M.clearRun()
+  return result
+end
+
+-- <Claude> Idle turtles (only those in the set `only`, if given) that kept a
+-- stopped or failed job (status `retry`, see bot/job.lua) carry on with it
+-- from its last checkpoint, as one new job, with no LLM call. Returns the
+-- runPlans result.
+function M.retry(turtles, only, onEvent)
+  local msgs, any = {}, false
+  for _, id in ipairs((M.idle(turtles, only))) do
+    if turtles[id].retry then msgs[id], any = { retry = true }, true end
+  end
+  if not any then return { ok = false, error = "no idle turtle has a stopped or failed job to retry" } end
+  local result = launch(msgs, turtles, onEvent, "retry", true)
   M.clearRun()
   return result
 end

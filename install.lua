@@ -25,7 +25,7 @@ local FILES = {
   "llm/config.lua", "llm/openrouter.lua", "llm/agent.lua",
   "bot/config.lua", "bot/nav.lua", "bot/inv.lua", "bot/mine.lua", "bot/skills.lua", "bot/plan.lua",
   "bot/net.lua", "bot/fleet.lua", "bot/job.lua", "bot/ui.lua", "bot/registry.lua", "bot/dash.lua",
-  "bot/version.lua",
+  "bot/version.lua", "bot/shape.lua", "bot/build.lua",
 }
 
 -- <Claude> --updated: this is the new copy, started by the old one (stops a loop).

@@ -100,6 +100,8 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | Turtle terminal | `brain <goal>` | One LLM call, then Lua runs the plan |
 | Turtle terminal | `brain refuel` | Burn everything in the inventory that burns, no LLM call |
 | Computer terminal | `fleet <goal>` | One LLM call plans for all turtles; Ctrl+T stops the busy turtles |
+| Computer terminal | `fleet do <steps>` | Idle turtles run typed steps, shared ones split between them, no LLM call (`fleet do` lists the skills) |
+| Computer terminal | `fleet retry [ids]` | Idle turtles carry on with their stopped or failed job from its last checkpoint, no LLM call |
 | Computer terminal | `fleet refuel [ids]` | Idle turtles (all, or the ids given) burn what burns, no LLM call |
 | Computer terminal | `fleet update` | This computer installs the newest commit, then idle turtles install the same one and reboot |
 | Computer terminal | `fleet resume` | Wait again for the job saved before a reboot |
@@ -109,6 +111,8 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 
 | Command | Does |
 |---|---|
+| `/do <steps>` | Like `fleet do`: e.g. `/do mineBox 0 60 0 31 50 15; goHome; unload`. `/do` alone lists the skills |
+| `/retry [id]` | Like `fleet retry`: carry on with stopped or failed jobs where they were |
 | `/stop [id]` | Stop all turtles and the goal, or one turtle |
 | `/home [id]` | Stop everything, then send turtles home (one turtle only if no goal is running) |
 | `/refuel [id]` | Idle turtles burn what burns (all, or one) |
@@ -145,6 +149,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 |---|---|---|
 | `/nav_state.json` | every turtle | position, heading, home, calibration markers |
 | `/job.json` | worker | current job, step and checkpoint (deleted when done) |
+| `/job_last.json` | worker | last stopped or failed job with its checkpoint, for `fleet retry` / `/retry` |
 | `/job_result.json` | worker | last result, kept until the brain acknowledges it |
 | `/fleet_job.json` | fleet brain | job in flight, used by `fleet resume` |
 | `/llm_last.json` | brain / fleet computer | raw last LLM response (read this first when a run misbehaves) |

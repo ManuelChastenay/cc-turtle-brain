@@ -5,9 +5,10 @@
   (bot/skills.lua) generates the prompt catalog, the tool schema and the
   argument checks, so adding a skill is one table entry.
   Arg types: "int", "count" (integer >= 1), "str", or an enum "a|b|c" where
-  "dir" stands for the 8 horizontal directions. Hidden args (hidden = true,
-  with a default) are checked but not shown to the LLM: the fleet's split
-  sets them.
+  "dir" stands for the 8 horizontal directions. An arg with optional = true
+  may be left out (no default: the skill gets nil). Hidden args (hidden =
+  true, with a default) are checked but not shown to the LLM: the fleet's
+  split sets them.
 ]]
 local config = require("bot.config")
 
@@ -39,7 +40,7 @@ end
 local function checkArg(spec, value)
   local name, t, default = spec[1], spec[2], spec[3]
   if value == nil then
-    if default == nil then return nil, "missing " .. name end
+    if default == nil and not spec.optional then return nil, "missing " .. name end
     return default
   end
   if t == "int" or t == "count" then
@@ -57,16 +58,18 @@ local function checkArg(spec, value)
 end
 
 -- <Claude> One line per skill for the system prompt: "- name(a, b=default): doc".
-function M.catalog(skills)
+-- brief = no doc (the `do` command's help).
+function M.catalog(skills, brief)
   local lines = {}
   for _, skill in ipairs(skills) do
     local params = {}
     for _, spec in ipairs(skill.args or {}) do
       if not spec.hidden then
-        params[#params + 1] = spec[3] ~= nil and ("%s=%s"):format(spec[1], tostring(spec[3])) or spec[1]
+        local default = spec[3] ~= nil and tostring(spec[3]) or spec.optional and "none"
+        params[#params + 1] = default and ("%s=%s"):format(spec[1], default) or spec[1]
       end
     end
-    lines[#lines + 1] = ("- %s(%s): %s"):format(skill.name, table.concat(params, ", "), skill.doc)
+    lines[#lines + 1] = ("- %s(%s)%s"):format(skill.name, table.concat(params, ", "), brief and "" or ": " .. skill.doc)
   end
   return table.concat(lines, "\n")
 end
@@ -130,13 +133,49 @@ function M.flatten(name, args)
   return step
 end
 
--- <Claude> "mineArea direction=north length=6 ..." (args in declaration order).
+-- <Claude> "mineArea direction=north length=6 ..." (args in declaration order;
+-- left-out optional args and hidden ones at their default are not shown).
 function M.format(step)
   local parts = { step.skill.name }
   for _, spec in ipairs(step.skill.args or {}) do
-    parts[#parts + 1] = ("%s=%s"):format(spec[1], tostring(step.args[spec[1]]))
+    local value = step.args[spec[1]]
+    if value ~= nil and not (spec.hidden and value == spec[3]) then
+      parts[#parts + 1] = ("%s=%s"):format(spec[1], tostring(value))
+    end
   end
   return table.concat(parts, " ")
+end
+
+-- <Claude> Steps typed by hand (the `do` command, no LLM), separated by ";":
+--   "mineSphere 0 100 0 200 bottom=75; goHome; unload"
+-- Bare values fill the skill's shown args in order, skipping those given as
+-- name=value. Skill names ignore case. Returns raw steps (as the LLM would
+-- send them, already checked) | nil, err.
+function M.parse(text, skills)
+  local index = {}
+  for _, skill in ipairs(skills) do index[skill.name:lower()] = skill end
+  local steps = {}
+  for part in tostring(text):gmatch("[^;]+") do
+    local words = {}
+    for word in part:gmatch("%S+") do words[#words + 1] = word end
+    if #words > 0 then
+      local skill = index[words[1]:lower()]
+      if not skill then return nil, ("step %d: unknown skill %s"):format(#steps + 1, words[1]) end
+      local step, bare = { skill = skill.name }, {}
+      for i = 2, #words do
+        local key, value = words[i]:match("^(%w+)=(.+)$")
+        if key then step[key] = value else bare[#bare + 1] = words[i] end
+      end
+      for _, spec in ipairs(skill.args or {}) do
+        if #bare > 0 and not spec.hidden and step[spec[1]] == nil then step[spec[1]] = table.remove(bare, 1) end
+      end
+      if #bare > 0 then return nil, ("step %d (%s): too many values"):format(#steps + 1, skill.name) end
+      steps[#steps + 1] = step
+    end
+  end
+  local ok, err = M.check(steps, skills)
+  if not ok then return nil, err end
+  return steps
 end
 
 local function outcome(step, result)

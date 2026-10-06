@@ -44,7 +44,9 @@ end
 -- <Claude> Returns finalText, stats  |  nil, errorString. onTool(name, result) is optional logging.
 -- stopped() is optional: checked before every LLM call, true ends the run with
 -- nil, "stopped" (the dashboard's stop button: no replanning after a stop).
-function M.run(goal, tools, systemPrompt, onTool, stopped)
+-- log(text) is optional: each call, its time and tokens, retries, and any
+-- text the model sends with its tool calls (the final reply is returned).
+function M.run(goal, tools, systemPrompt, onTool, stopped, log)
   local messages = {
     { role = "system", content = systemPrompt },
     { role = "user",   content = goal },
@@ -53,12 +55,19 @@ function M.run(goal, tools, systemPrompt, onTool, stopped)
 
   for turn = 1, config.maxTurns do
     if stopped and stopped() then return nil, "stopped" end
-    local msg, usage = client.chat(messages, schema)
+    if log then log(("LLM call %d/%d: %s"):format(turn, config.maxTurns, config.model)) end
+    local start = os.clock()
+    local msg, usage = client.chat(messages, schema, log)
     if not msg then return nil, usage end
     stats.turns = turn
     if usage then
       stats.tokensIn  = stats.tokensIn  + (usage.prompt_tokens or 0)
       stats.tokensOut = stats.tokensOut + (usage.completion_tokens or 0)
+    end
+    if log then
+      log(("LLM answered in %d s (%d in / %d out tokens)"):format(math.floor(os.clock() - start),
+        usage and usage.prompt_tokens or 0, usage and usage.completion_tokens or 0))
+      if msg.tool_calls and #msg.tool_calls > 0 and (msg.content or "") ~= "" then log("LLM: " .. msg.content) end
     end
 
     messages[#messages + 1] = {

@@ -35,7 +35,8 @@ local function post(payload)
   return code, textutils.unserialiseJSON(body), body
 end
 
-function M.chat(messages, tools)
+-- <Claude> log(text) (optional) hears each retry, so a slow call is not silent.
+function M.chat(messages, tools, log)
   local payload = { model = config.model, messages = messages }
   if tools and #tools > 0 then
     payload.tools = tools
@@ -53,6 +54,7 @@ function M.chat(messages, tools)
     if not retryable or attempt == config.maxRetries then
       return nil, ("HTTP %s: %s"):format(tostring(code), tostring(raw))
     end
+    if log then log(("LLM %s, retry in %d s"):format(code and "HTTP " .. code or tostring(raw), math.floor(2 ^ attempt))) end
     sleep(2 ^ attempt)
   end
 end

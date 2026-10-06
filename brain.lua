@@ -43,7 +43,7 @@ end)
 
 local text, stats = agent.run(goal .. "\nState: " .. state, { runPlan = runPlan }, SYSTEM, function(name, result)
   if not result.ok then printError(("> %s: %s"):format(name, tostring(result.error))) end
-end)
+end, nil, print)
 
 if text then
   print(text)

@@ -124,4 +124,52 @@ function M.unload()
   return true, moved, junked
 end
 
+-- <Claude> How many `name` items the turtle holds.
+function M.count(name)
+  local n = 0
+  for slot = 1, 16 do
+    local item = turtle.getItemDetail(slot)
+    if item and item.name == name then n = n + item.count end
+  end
+  return n
+end
+
+-- <Claude> Fills the inventory from the adjacent inventory on side (default:
+-- the first found; turns toward one on the left/right/back and back after).
+-- Keeps `name` and fuel; anything else it took goes back (what the turtle
+-- already held stays). turtle.suck takes the chest's slots in order, so a
+-- chest holding other things first gives nothing: keep only the build
+-- block (and fuel) in it. Returns how many `name` items the turtle holds,
+-- or nil, err.
+function M.take(name, side)
+  side = side or M.findChest()
+  if not side or not peripheral.hasType(side, "inventory") then return nil, "no chest next to the turtle" end
+  local before = nav.heading()
+  if TURNS[side] then
+    if not before then return nil, "heading unknown, cannot turn to the chest" end
+    nav.face((before + TURNS[side]) % 4)
+  end
+  local suck = side == "top" and turtle.suckUp or side == "bottom" and turtle.suckDown or turtle.suck
+  local drop = side == "top" and turtle.dropUp or side == "bottom" and turtle.dropDown or turtle.drop
+  local held = {}
+  for slot = 1, 16 do
+    local item = turtle.getItemDetail(slot)
+    held[slot] = item and { name = item.name, count = item.count }
+  end
+  while M.freeSlots() > 0 and suck() do end
+  for slot = 1, 16 do
+    local item = turtle.getItemDetail(slot)
+    if item and item.name ~= name and not nav.isFuel(item.name) then
+      local had = held[slot] and held[slot].name == item.name and held[slot].count or 0
+      if item.count > had then
+        turtle.select(slot)
+        drop(item.count - had)
+      end
+    end
+  end
+  turtle.select(1)
+  if TURNS[side] then nav.face(before) end
+  return M.count(name)
+end
+
 return M

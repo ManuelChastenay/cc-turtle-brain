@@ -6,7 +6,8 @@
   plans, the other keeps answering the brain (status pings, "busy", stop)
   and other turtles (makeway). Jobs are saved to disk (bot/job.lua): after
   a reboot the worker carries on where it stopped, and keeps the result
-  until the brain acknowledges it. When idle, `update` from the brain
+  until the brain acknowledges it. A stopped or failed job is kept too: a
+  plan with retry = true carries on with it from its last checkpoint. When idle, `update` from the brain
   installs a commit from GitHub and reboots into it. Every status carries
   the version it runs (bot/version.lua). Protocol: bot/net.lua.
 ]]
@@ -57,6 +58,7 @@ local function status(quick)
     msg.quick = true
   else
     msg.state, msg.result = skills.state(), not current and jobs.result() or nil
+    msg.retry = not current and jobs.canRetry() or nil -- a stopped or failed job to carry on with
   end
   return msg
 end
@@ -122,9 +124,17 @@ local function handle(from, msg)
   elseif msg.type == "plan" and current then
     net.send(from, { type = "result", job = msg.job, ok = false, error = "busy with job " .. tostring(current.id) })
   elseif msg.type == "plan" then
-    local steps, err = plan.check(msg.steps, skills.list)
+    -- <Claude> retry = carry on with the last stopped or failed job (bot/job.lua) from its checkpoint.
+    local last = msg.retry and jobs.last()
+    local steps, err
+    if msg.retry and not last then
+      err = "no stopped or failed job to retry"
+    else
+      steps, err = plan.check(last and last.steps or msg.steps, skills.list)
+    end
     if steps then
-      current = { id = msg.job, boss = from, steps = steps, record = jobs.start(msg.job, from, msg.steps) }
+      local record = last and jobs.retry(last, msg.job, from) or jobs.start(msg.job, from, msg.steps)
+      current = { id = msg.job, boss = from, steps = steps, record = record }
       net.send(from, { type = "accepted", job = msg.job })
       os.queueEvent("ccbrain_job")
     else

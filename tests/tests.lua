@@ -547,6 +547,26 @@ local function brainSetup()
   return require("llm.agent"), { runPlan = plan.tool(skills.list, skills.state) }
 end
 
+test("plan.parse: typed steps, bare values in order or name=value, checked", function()
+  local plan, skills = require("bot.plan"), require("bot.skills")
+  local steps = assert(plan.parse("MineSphere 0 100 0 200 bottom=75; goHome ;unload", skills.list))
+  eq(#steps, 3)
+  eq(steps[1].skill, "mineSphere") eq(steps[1].x, "0") eq(steps[1].diameter, "200")
+  eq(steps[1].top, nil) eq(steps[1].bottom, "75")
+  eq(steps[2].skill, "goHome") eq(steps[3].skill, "unload")
+  local s = plan.check(steps, skills.list)
+  eq(s[1].args.diameter, 200)
+  eq(plan.format(s[1]), "mineSphere x=0 y=100 z=0 diameter=200 bottom=75", "no top, no part/parts at 1")
+  eq(plan.format({ skill = s[1].skill, args = { x = 0, y = 1, z = 2, diameter = 9, part = 3, parts = 8 } }),
+    "mineSphere x=0 y=1 z=2 diameter=9 part=3 parts=8")
+  local function err(text) local r, e = plan.parse(text, skills.list) eq(r, nil) return e end
+  eq(err("fly 3"), "step 1: unknown skill fly")
+  eq(err("goHome; face north east"), "step 2 (face): too many values")
+  eq(err("mineBox 0 60 0 9 50"), "step 1 (mineBox): missing z2")
+  eq(err("goTo 1 2 z=up"), "step 1 (goTo): z must be an integer")
+  eq(err(" ; "), "steps must be a non-empty list")
+end)
+
 test("agent: a good plan costs exactly one LLM call", function()
   sim.reset{ turtle = { x = 442, y = 31, z = 907, h = 1, fuel = 78 } }
   local calls = fakeClient({ { { skill = "mineArea", direction = "north", length = 6, width = 6, layers = 3 }, { skill = "goHome" } } })
@@ -696,22 +716,35 @@ local function at(k)
   return tonumber(x), tonumber(y), tonumber(z)
 end
 
--- <Claude> Keys of a cylinder: the circle (mine.circle, checked against the
--- definition below) centered on x,z, from level y1 to y2.
-local function cylinder(mine, x, z, d, y1, y2)
-  local lo, cells = math.floor((d - 1) / 2), {}
-  for i, c in ipairs(mine.circle(d)) do
-    for j = c[1], c[2] do
-      for y = math.min(y1, y2), math.max(y1, y2) do cells[sim.key(x - lo + i - 1, y, z - lo + j)] = true end
-    end
+-- <Claude> Keys of the blocks of a shape (bot/shape.lua), and how many.
+local function blocks(s)
+  local cells, n = {}, 0
+  for x = s.x1, s.x2 do for y = s.y1, s.y2 do for z = s.z1, s.z2 do
+    if require("bot.shape").inside(s, x, y, z) then cells[sim.key(x, y, z)], n = true, n + 1 end
+  end end end
+  return cells, n
+end
+
+-- <Claude> Keys of a cylinder (shape.line checked against the definition below)
+-- centered on x,z, from level y1 to y2.
+local function cylinder(_, x, z, d, y1, y2)
+  return (blocks(require("bot.shape").cylinder(x, z, d, y1, y2)))
+end
+
+-- <Claude> A circle's columns as { first z, last z } offsets, like the chart.
+local function circle(d)
+  local shape = require("bot.shape")
+  local s, cols = shape.cylinder(0, 0, d, 0, 0), {}
+  for x = s.x1, s.x2 do
+    local a, b = shape.line(s, 0, x, nil)
+    cols[#cols + 1] = { a - s.z1, b - s.z1 }
   end
-  return cells
+  return cols
 end
 
 test("circle: 75 wide is the circle of the chart (one-block bumps); small and even sizes", function()
   sim.reset{}
-  local mine = require("bot.mine")
-  local cols = mine.circle(75)
+  local cols = circle(75)
   eq(#cols, 75)
   eq(cols[1][1], 37) eq(cols[1][2], 37, "west bump")
   eq(cols[2][1], 29) eq(cols[2][2], 45, "column 1")
@@ -724,7 +757,7 @@ test("circle: 75 wide is the circle of the chart (one-block bumps); small and ev
   end
   local function shape(d)
     local out = {}
-    for i, c in ipairs(mine.circle(d)) do out[i] = c[1] .. "-" .. c[2] end
+    for i, c in ipairs(circle(d)) do out[i] = c[1] .. "-" .. c[2] end
     return table.concat(out, " ")
   end
   eq(shape(1), "0-0") eq(shape(2), "0-1 0-1") eq(shape(3), "1-1 0-2 1-1")
@@ -733,12 +766,13 @@ end)
 
 test("circle shares: each column in exactly one share, shares hold about as many blocks", function()
   sim.reset{}
-  local mine = require("bot.mine")
-  local cols = mine.circle(75)
+  local shape = require("bot.shape")
+  local cols = circle(75)
+  local counts = shape.counts(shape.cylinder(0, 0, 75, 0, 0), "solid", "x")
   for parts = 1, 40 do
     local nextCol, sizes = 0, {}
     for part = 1, parts do
-      local from, to = mine.share(cols, part, parts)
+      local from, to = shape.share(counts, part, parts)
       eq(from, nextCol, ("%d parts: share %d starts where the last ended"):format(parts, part))
       truthy(to >= from, "not empty")
       local n = 0
@@ -752,8 +786,8 @@ test("circle shares: each column in exactly one share, shares hold about as many
       truthy(hi <= lo * 1.3, ("%d parts: %d to %d blocks"):format(parts, lo, hi))
     end
   end
-  eq(mine.share(mine.circle(3), 4, 5), nil, "more parts than columns: nothing")
-  local from, to = mine.share(mine.circle(3), 3, 5)
+  eq(shape.share({ 1, 3, 1 }, 4, 5), nil, "more parts than columns: nothing")
+  local from, to = shape.share({ 1, 3, 1 }, 3, 5)
   eq(from, 2) eq(to, 2)
 end)
 
@@ -787,7 +821,8 @@ test("mineCircle shares: three shares dig the cylinder once, each in its own col
     local before = #sim.dugLog
     local r = mine.mineCircle({ x = 0, z = 0, diameter = 9, y1 = 30, y2 = 26, part = part, parts = 3 })
     truthy(r.ok, part .. ": " .. tostring(r.error))
-    local from, to = mine.share(mine.circle(9), part, 3)
+    local shape = require("bot.shape")
+    local from, to = shape.share(shape.counts(shape.cylinder(0, 0, 9, 30, 26), "solid", "x"), part, 3)
     for i = before + 1, #sim.dugLog do
       local k = sim.dugLog[i]
       local x = at(k)
@@ -902,6 +937,7 @@ test("worker: status, plan with progress, busy, rejected plan, stop", function()
   eq(msg(7).ok, true) truthy(msg(7).summary:find("^Done: mineArea"), msg(7).summary)
   truthy(msg(8).error:find("plan rejected"), msg(8).error)
   eq(msg(11).ok, false) eq(msg(11).error, "stopped by the brain")
+  eq(textutils.unserialiseJSON(sim.files["/job_last.json"]).id, "j3", "the stopped job is kept for a retry")
   -- the stop cut a command off mid-way: position and heading must still match the world
   eq(msg(11).pos.x, sim.t.x) eq(msg(11).pos.y, sim.t.y) eq(msg(11).pos.z, sim.t.z)
   eq(textutils.unserialiseJSON(sim.files["/nav_state.json"]).heading, sim.t.h, "saved heading")
@@ -1106,7 +1142,8 @@ end)
 -- holds until acked, silentUntil = ignores everything until that virtual
 -- time, finishAfter = finishes `job` after answering that many pings,
 -- old = a worker from before `update` (ignores it). f.updated = the commit it was
--- asked to install (true when none), once it updated.
+-- asked to install (true when none), once it updated. retry = it kept a stopped
+-- job (status `retry`); f.retried = the job it was asked to carry on with it.
 local function fakeFleet(fakes)
   sim.modem = true
   sim.onSend = function(to, msg)
@@ -1123,7 +1160,7 @@ local function fakeFleet(fakes)
         if msg.type == "hello" then
           f.pings = (f.pings or 0) + 1
           sim.deliver(id, { type = "status", label = f.label, state = "fuel 500", pos = f.pos, job = f.job,
-                            result = not f.job and f.kept or nil })
+                            result = not f.job and f.kept or nil, retry = f.retry })
           if f.job and f.finishAfter and f.pings >= f.finishAfter then
             f.kept = { type = "result", job = f.job, ok = true, summary = "Done: late", state = "fuel 200", pos = f.pos }
             f.job = nil
@@ -1134,7 +1171,8 @@ local function fakeFleet(fakes)
           if f.kept and f.kept.job == msg.job then f.kept = nil end
         elseif msg.type == "plan" then
           sim.deliver(id, { type = "accepted", job = msg.job })
-          f.steps, f.job = msg.steps, msg.job
+          f.steps, f.job, f.retried = msg.steps, msg.job, msg.retry and msg.job
+          msg = msg.retry and { job = msg.job, steps = {} } or msg
           if f.mode == "lost" then
             f.gone = true
           elseif f.mode == "forget" then
@@ -1182,6 +1220,9 @@ test("fleet.lua: one LLM call, mineBox split between two turtles, other steps to
   eq(fakes[7].steps[2].skill, "goHome") eq(fakes[8].steps[2].skill, "goHome")
   local text = table.concat(out, "\n")
   truthy(text:find("#7 Done: 2 steps", 1, true) and text:find("#8 Done: 2 steps", 1, true), text)
+  -- what the LLM did shows while it happens
+  truthy(text:find("LLM call 1/4: ", 1, true) and text:find("LLM answered in 0 s (100 in / 30 out tokens)", 1, true)
+    and text:find("plan for #8,7: mineBox x1=0 y1=28 z1=5 x2=15 y2=30 z2=10; goHome", 1, true), text)
 end)
 
 test("fleet: a failed turtle sends every outcome and fresh state back to the model", function()
@@ -1447,6 +1488,22 @@ test("nav: a reboot in the middle of calibrating is undone at the next start", f
   scenario({ { 1, 0 }, { -1, 0 } }, { 1, 2, 3 })  -- and once more, mid-way back
 end)
 
+test("nav: reboots in the middle of calibrating keep home", function()
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 1, fuel = 100 } }
+  local home = { x = 40, y = 31, z = -12, heading = 2 }
+  sim.files["/nav_state.json"] = textutils.serialiseJSON({ pos = { x = 0, y = 31, z = 0 }, heading = 1, home = home })
+  for _ = 1, 2 do
+    sim.terminateAtMove = sim.moves + 1 -- cut off right after the calibration's first step
+    local ok, err = pcall(function() require("bot.nav").init() end)
+    eq(ok, false) eq(err, "Terminated")
+    sim.reboot()
+  end
+  local nav = require("bot.nav")
+  nav.init()
+  local h = nav.home()
+  eq(h.x, 40) eq(h.y, 31) eq(h.z, -12) eq(h.heading, 2)
+end)
+
 test("nav: walled in, it measures its heading one block up; sealed in after a cut-off calibration, it refuses to guess", function()
   sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 3, fuel = 100 } }
   for _, d in ipairs({ { 1, 0 }, { -1, 0 }, { 0, 1 }, { 0, -1 } }) do sim.set(d[1], 31, d[2], "minecraft:stone") end
@@ -1552,6 +1609,52 @@ test("worker: keeps its result until the brain acks it; reports a job it cannot 
   local status = sim.sent[#sim.sent].msg
   eq(status.job, nil) eq(status.result.job, "j9")
   truthy(status.result.error:find("could not resume", 1, true), status.result.error)
+end)
+
+test("worker: a failed job is kept; retry carries on from its checkpoint, even after other jobs", function()
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 1, fuel = 5000 }, modem = true, id = 5 }
+  sim.set(2, 28, -3, "minecraft:bedrock")
+  local script = {
+    { type = "plan", job = "j1", steps = { { skill = "mineArea", direction = "north", length = 5, width = 4, layers = 4 },
+                                           { skill = "move", direction = "up" } } },
+    { type = "plan", job = "j2", steps = { { skill = "face", direction = "east" } } },
+    { type = "hello" },
+    "mine the bedrock",
+    { type = "plan", job = "j3", retry = true },
+    { type = "hello" },
+    { type = "plan", job = "j4", retry = true },
+  }
+  local digsBefore
+  sim.onIdle = function()
+    local m = table.remove(script, 1)
+    if m == "mine the bedrock" then
+      sim.set(2, 28, -3, nil)
+      digsBefore = #sim.dugLog
+      m = table.remove(script, 1)
+    end
+    if m then sim.deliver(99, m) end
+    return m ~= nil
+  end
+  local _, _, err = quietly(assert(loadfile(REPO .. "worker.lua")))
+  eq(err, "SIM_IDLE")
+  local results, statuses = {}, {}
+  for _, s in ipairs(sim.sent) do
+    if s.msg.type == "result" then results[s.msg.job] = s.msg end
+    if s.msg.type == "status" then statuses[#statuses + 1] = s.msg end
+  end
+  eq(results.j1.ok, false) truthy(results.j1.error:find("Unbreakable", 1, true), results.j1.error)
+  eq(results.j2.ok, true, tostring(results.j2.error))
+  eq(statuses[1].retry, true, "j1 can be retried after j2")
+  eq(results.j3.ok, true, tostring(results.j3.error))
+  truthy(results.j3.summary:find("^Done: mineArea .*; move$"), results.j3.summary)
+  eq(statuses[2].retry, nil, "nothing left to retry")
+  eq(results.j4.ok, false) truthy(results.j4.error:find("no stopped or failed job to retry", 1, true), results.j4.error)
+  local box = boxCells({ x = 0, y = 31, z = 0 }, 0, 5, 4, 4, "down", "right")
+  for k in pairs(box) do eq(sim.get(k:match("(-?%d+),(-?%d+),(-?%d+)")), nil, "box cell " .. k) end
+  for _, k in ipairs(sim.dugLog) do truthy(box[k], "collateral dig at " .. k) end
+  truthy(#sim.dugLog - digsBefore < 79, "the retry dug only what was left: " .. (#sim.dugLog - digsBefore))
+  eq(sim.t.x, 0) eq(sim.t.y, 32, "the step after the retried one ran too") eq(sim.t.z, 0)
+  eq(sim.files["/job_last.json"], nil)
 end)
 
 test("fleet: the job is saved before plans go out, and cleared once done", function()
@@ -1759,6 +1862,65 @@ test("fleet refuel: one refuel step for idle turtles, no LLM call, nothing left 
   eq(#calls, 1)
 end)
 
+test("fleet do: typed steps for the idle turtles, shared ones split, no LLM call", function()
+  sim.reset{}
+  local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 } }, [8] = { label = "b", pos = { x = 30, y = 31, z = 0 } },
+                  [9] = { label = "c", pos = { x = 9, y = 31, z = 9 }, job = "x" } }
+  fakeFleet(fakes)
+  local reply, saved = sim.onSend, nil
+  sim.onSend = function(to, msg, proto)
+    if msg.type == "plan" then saved = textutils.unserialiseJSON(sim.files["/fleet_job.json"] or "null") end
+    reply(to, msg, proto)
+  end
+  local calls = fakeClient({})
+  local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "do", "mineBox", "0", "28", "5", "15", "30", "10;", "goHome")
+  truthy(ok, tostring(err)) eq(#calls, 0, "LLM calls")
+  eq(fakes[7].steps[1].x1, 0) eq(fakes[7].steps[1].x2, 7)
+  eq(fakes[8].steps[1].x1, 8) eq(fakes[8].steps[1].x2, 15)
+  eq(fakes[7].steps[2].skill, "goHome") eq(fakes[9].steps, nil, "busy one left alone")
+  local text = table.concat(out, "\n")
+  truthy(text:find("#7 Done: 2 steps", 1, true) and text:find("1 busy turtle(s) left alone", 1, true), text)
+  eq(saved.manual, true, "saved as sent without the LLM")
+  eq(sim.files["/fleet_job.json"], nil, "job file")
+  -- a typo is caught before anything is sent
+  local sent = #sim.sent
+  out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "do", "mineBox", "0", "28")
+  eq(ok, false) truthy(tostring(err):find("missing z1", 1, true), tostring(err))
+  eq(#sim.sent, sent)
+  -- `fleet do` alone lists the skills
+  out = quietly(assert(loadfile(REPO .. "fleet.lua")), "do")
+  truthy(table.concat(out, "\n"):find("- mineSphere(x, y, z, diameter, top=none, bottom=none)\n", 1, true), table.concat(out, "\n"))
+end)
+
+test("fleet retry: idle turtles that kept a stopped or failed job carry on with it, no LLM call", function()
+  sim.reset{}
+  local fakes = { [7] = { label = "a", pos = { x = 0, y = 31, z = 0 }, retry = true },
+                  [8] = { label = "b", pos = { x = 9, y = 31, z = 0 } },
+                  [9] = { label = "c", pos = { x = 9, y = 31, z = 9 }, retry = true, job = "x" } }
+  fakeFleet(fakes)
+  local calls = fakeClient({})
+  local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "retry")
+  truthy(ok, tostring(err)) eq(#calls, 0, "LLM calls")
+  truthy(fakes[7].retried, "retried") eq(fakes[8].retried, nil, "nothing to retry") eq(fakes[9].retried, nil, "busy")
+  truthy(table.concat(out, "\n"):find("#7 Done", 1, true), table.concat(out, "\n"))
+  eq(sim.files["/fleet_job.json"], nil, "job file")
+  out = quietly(assert(loadfile(REPO .. "fleet.lua")), "retry", "8")
+  truthy(table.concat(out, "\n"):find("no idle turtle has a stopped or failed job to retry", 1, true), table.concat(out, "\n"))
+end)
+
+test("fleet resume: a failed job that was sent without the LLM is only reported", function()
+  sim.reset{}
+  fakeFleet({ [7] = { label = "a", pos = { x = 0, y = 31, z = 0 },
+    kept = { type = "result", job = "1-7", ok = false, error = "step 1 (mineBox) failed: bedrock" } } })
+  sim.files["/fleet_job.json"] = textutils.serialiseJSON({ goal = "mineBox 0 60 0 9 50 9", job = "1-7", manual = true,
+    pending = { 7 }, results = {} })
+  local calls = fakeClient({})
+  local out, ok, err = quietly(assert(loadfile(REPO .. "fleet.lua")), "resume")
+  truthy(ok, tostring(err)) eq(#calls, 0, "LLM calls")
+  truthy(table.concat(out, "\n"):find("#7 step 1 (mineBox) failed: bedrock", 1, true), table.concat(out, "\n"))
+  eq(sim.files["/fleet_job.json"], nil, "cleared")
+end)
+
 ---------------------------------------------------------------- install.lua
 local INSTALLER = (function()
   local f = assert(io.open(REPO .. "install.lua", "r"))
@@ -1890,8 +2052,10 @@ test("install: a changed installer hands over to its new copy, with the same arg
 end)
 
 ---------------------------------------------------------------- dashboard (bot/ui, bot/registry, bot/dash)
-local helpers = { fakeClient = fakeClient, fakeFleet = fakeFleet, quietly = quietly, fakeShell = fakeShell }
-for _, file in ipairs({ "ui_tests.lua", "registry_tests.lua", "dash_tests.lua" }) do
+local helpers = { fakeClient = fakeClient, fakeFleet = fakeFleet, quietly = quietly, fakeShell = fakeShell,
+  saveState = saveState, count = count, at = at, blocks = blocks, twoTurtles = twoTurtles, both = both,
+  runWorkerWithReboots = runWorkerWithReboots, lastResult = lastResult }
+for _, file in ipairs({ "ui_tests.lua", "registry_tests.lua", "dash_tests.lua", "shape_tests.lua" }) do
   local path = SIM_DIR .. file
   local f = io.open(path, "r")
   if f then f:close() dofile(path)(test, eq, truthy, helpers) end

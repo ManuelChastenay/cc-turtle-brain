@@ -148,6 +148,7 @@ function sim.reset(o)
   sim.sleeps, sim.moves, sim.lost, sim.attacks = 0, 0, 0, 0
   sim.ground = {}          -- item name -> count dropped on the ground
   sim.dugLog = {}          -- keys dug, in order
+  sim.placeLog = {}        -- keys placed, in order
   sim.terminateAtMove, sim.terminateAtAction, sim.actions = nil, nil, 0
   -- computer, events and rednet (see below)
   sim.id, sim.label, sim.modem = o.id or 1, o.label, o.modem or false
@@ -271,6 +272,37 @@ local function dig(t, side)
   return true
 end
 
+-- Places the selected item as a block (item name = block name) where nothing solid is.
+local function place(t, side)
+  local it = t.inv[t.sel]
+  if not it then return false, "No items to place" end
+  local x, y, z = target(t, side)
+  if solid(sim.get(x, y, z)) or sim.mobs[key(x, y, z)] then return false, "Cannot place block here" end
+  sim.set(x, y, z, it.name)
+  sim.placeLog[#sim.placeLog + 1] = key(x, y, z)
+  it.count = it.count - 1
+  if it.count == 0 then t.inv[t.sel] = nil end
+  return true
+end
+
+-- Takes from the chest's first stack, as much as fits (merging, then empty slots).
+local function suck(t, side, count)
+  local chest = sim.chests[key(target(t, side))]
+  local stack = chest and chest.items[1]
+  if not stack then return false, "No items to take" end
+  local room = 0
+  for slot = 1, 16 do
+    local it = t.inv[slot]
+    if not it then room = room + 64 elseif it.name == stack.name then room = room + 64 - it.count end
+  end
+  if room == 0 then return false, "No space for items" end
+  count = math.min(count or 64, stack.count, room)
+  addItem(t, stack.name, count)
+  stack.count = stack.count - count
+  if stack.count == 0 then table.remove(chest.items, 1) end
+  return true
+end
+
 local function attack(t, side)
   local k = key(target(t, side))
   sim.attacks = sim.attacks + 1
@@ -318,6 +350,12 @@ local function makeTurtle(get)
     attackUp = function() return attack(get(), "up") end,
     attackDown = function() return attack(get(), "down") end,
     drop = function(n) return drop(get(), "front", n) end,
+    place = function() return place(get(), "front") end,
+    placeUp = function() return place(get(), "up") end,
+    placeDown = function() return place(get(), "down") end,
+    suck = function(n) return suck(get(), "front", n) end,
+    suckUp = function(n) return suck(get(), "up", n) end,
+    suckDown = function(n) return suck(get(), "down", n) end,
     dropUp = function(n) return drop(get(), "up", n) end,
     dropDown = function(n) return drop(get(), "down", n) end,
     getFuelLevel = function() return get().fuel end,
@@ -352,6 +390,7 @@ local function makeTurtle(get)
   local looks = { detect = true, detectUp = true, detectDown = true, inspect = true, inspectUp = true, inspectDown = true }
   for _, name in ipairs({ "forward", "back", "up", "down", "turnLeft", "turnRight", "dig", "digUp", "digDown",
       "attack", "attackUp", "attackDown", "drop", "dropUp", "dropDown", "refuel",
+      "place", "placeUp", "placeDown", "suck", "suckUp", "suckDown",
       "detect", "detectUp", "detectDown", "inspect", "inspectUp", "inspectDown" }) do
     local fn = api[name]
     api[name] = function(...)

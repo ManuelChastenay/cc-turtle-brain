@@ -6,10 +6,12 @@
       REFUEL ALL, SET HOME, a stop per busy turtle). Without a monitor the
       dashboard takes the terminal.
     - the terminal's last line is a prompt: text is a goal for the LLM
-      (the same flow as `fleet <goal>`), /commands run in Lua at once.
+      (the same flow as `fleet <goal>`; each LLM call, its plans and any
+      retry show in the log), /commands run in Lua at once, among them
+      /do (typed steps, no LLM) and /retry (carry on a stopped job).
   Coroutines under parallel: listener (rednet -> bot/registry), ticker (poll
   the turtles with a quick hello, redraw every second), screen, keyboard,
-  touches and runner (goals, home, refuel, set home, update, resume: one at a time,
+  touches and runner (goals, do, retry, home, refuel, set home, update, resume: one at a time,
   because the fleet saves a single job). A blocking http.post in the runner
   only stops the runner: every other coroutine still gets every event.
   The drawing is bot/ui.lua, the state bot/registry.lua.
@@ -22,6 +24,7 @@
 local agent = require("llm.agent")
 local fleet = require("bot.fleet")
 local net = require("bot.net")
+local plan = require("bot.plan")
 local registry = require("bot.registry")
 local version = require("bot.version")
 local ui = require("bot.ui")
@@ -34,6 +37,9 @@ local CONFIRM_WAIT = 5 -- seconds for the second tap on SET HOME
 local LOG_WIDTH = 44
 
 local HELP = {
+  "/do skill args; ...  idle turtles run steps, no LLM",
+  "/do         list the skills and their args",
+  "/retry [id] carry on stopped/failed jobs",
   "/stop [id]  stop every turtle and the goal, or one turtle",
   "/home [id]  stop everything, then send turtles home",
   "/refuel [id] idle turtles burn what burns",
@@ -198,7 +204,7 @@ function M.run(opts)
     say("goal: " .. display)
     local turtles = fleet.discover(2)
     if next(turtles) == nil then say("no turtle answered: is `worker` running on them?") return end
-    local runPlans = fleet.tool(skills, turtles, onEvent, display)
+    local runPlans = fleet.tool(skills, turtles, onEvent, display, say)
     local inner = runPlans.handler
     runPlans.handler = function(a)
       if cancelled then return { ok = false, error = "stopped by the user" } end
@@ -210,7 +216,7 @@ function M.run(opts)
       return result
     end
     local reply, stats = agent.run(prompt .. "\nTurtles:\n" .. fleet.describe(turtles), { runPlans = runPlans },
-      opts.system, onTool, function() return cancelled end)
+      opts.system, onTool, function() return cancelled end, say)
     if reply then
       fleet.clearRun()
       state.calls = state.calls + stats.turns
@@ -238,7 +244,7 @@ function M.run(opts)
     for id in pairs(saved.pending) do turtles[id] = turtles[id] or { label = "?", state = "no answer yet" } end
     local text, failed = fleet.outcome(fleet.wait(saved, turtles, onEvent))
     say(text)
-    if failed == 0 then fleet.clearRun() return end
+    if failed == 0 or saved.manual then fleet.clearRun() return end -- /retry carries on without the LLM
     ask(tostring(saved.goal), tostring(saved.goal) .. "\nThis job was interrupted, then resumed. Outcome per turtle:\n"
       .. text .. "\nPlan only the work that is left, or reply in one line.")
   end
@@ -275,21 +281,32 @@ function M.run(opts)
     report(fleet.runSteps(skills, turtles, ids, { { skill = "goHome" } }, onEvent, "go home"))
   end
 
-  -- <Claude> One step for the idle turtles in job.ids (all if nil). Busy ones are left alone.
-  local function idleStep(job, what, skill)
+  -- <Claude> Steps for the idle turtles in job.ids (all if nil), as one group:
+  -- shared steps are split between them. Busy ones are left alone.
+  local function idleSteps(job, what, steps)
     state.goal, state.llm = what, "waiting"
     local turtles = fleet.discover(2)
     local ids, busy = fleet.idle(turtles, job.ids)
     if busy > 0 then say(("%s: %d busy turtle(s) left alone"):format(what, busy)) end
     if #ids == 0 then say(("%s: no idle turtle"):format(what)) return end
-    report(fleet.runSteps(skills, turtles, ids, { { skill = skill } }, onEvent, what))
+    say(("%s: %d turtle(s)"):format(what, #ids))
+    report(fleet.runSteps(skills, turtles, ids, steps, onEvent, what))
   end
 
+  -- <Claude> Typed steps (/do), already checked by plan.parse.
+  JOBS["do"] = function(job) idleSteps(job, job.text, job.steps) end
+
   -- <Claude> Burn what burns.
-  function JOBS.refuel(job) idleStep(job, "refuel", "refuel") end
+  function JOBS.refuel(job) idleSteps(job, "refuel", { { skill = "refuel" } }) end
 
   -- <Claude> Home becomes where each turtle is, facing the way it faces.
-  function JOBS.sethome(job) idleStep(job, "set home", "setHome") end
+  function JOBS.sethome(job) idleSteps(job, "set home", { { skill = "setHome" } }) end
+
+  -- <Claude> Idle turtles carry on with the job they stopped or failed, from its last checkpoint.
+  function JOBS.retry(job)
+    state.goal, state.llm = "retry", "waiting"
+    report(fleet.retry(fleet.discover(2), job.ids, onEvent))
+  end
 
   -- <Claude> Like `fleet update`: this computer installs the newest commit
   -- (its output shows on the terminal meanwhile; the monitor stays up), then
@@ -413,7 +430,18 @@ function M.run(opts)
       end
     elseif name == "resume" then
       if pending > 0 then feedback = "busy: wait for the current job or /stop it" else enqueue({ kind = "resume" }) end
-    elseif name == "refuel" or name == "sethome" or name == "update" then
+    elseif name == "do" then
+      local steps, err = plan.parse(rest, skills)
+      if rest == "" then
+        say("/do skill args; ... (bare values in order, or name=value)\n" .. plan.catalog(skills, true))
+      elseif not steps then
+        feedback = err
+      elseif pending > 0 then
+        feedback = "busy: wait for the current job or /stop it"
+      else
+        enqueue({ kind = "do", steps = steps, text = rest })
+      end
+    elseif name == "refuel" or name == "sethome" or name == "update" or name == "retry" then
       if rest ~= "" and not id then
         feedback = ("usage: /%s [id]"):format(name)
       elseif pending > 0 then

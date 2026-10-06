@@ -6,19 +6,22 @@
                                                every few seconds
                      plan { job, steps }       reply: accepted, then progress..., result
                                                (or at once: result with ok = false if busy/invalid)
+                     plan { job, retry = true } the same, for the last stopped or failed job
+                                               (bot/job.lua), from its checkpoint, under this job id
                      ack { job }               the brain has the result: the turtle forgets it
                      stop                      the running plan stops where it is, reply: result
                      update { sha, n }         install that commit (the newest if no sha) and
                                                reboot, reply: updating, then updated (a busy
                                                turtle only answers updated with ok = false)
-    turtle -> brain  status { label, state, pos, fuel, job, step, steps, text, result, quick, version }
+    turtle -> brain  status { label, state, pos, fuel, job, step, steps, text, result, quick, version, retry }
                                                job = id of the running plan; step/steps/text =
                                                the step it is on (only with a job); fuel = number
                                                or "unlimited"; result = last result message, until
                                                acknowledged. A quick status has no state or
                                                result and quick = true (bot/fleet.lua ignores it
                                                when deciding a job was lost); version = the
-                                               code it runs, "v8 d2ffe09" (bot/version.lua)
+                                               code it runs, "v8 d2ffe09" (bot/version.lua);
+                                               retry = true when idle with a job to retry (not quick)
                      progress { job, step, steps, text }
                      result { job, ok, summary | error, failed, completed, state, pos }
                      updating                  install started

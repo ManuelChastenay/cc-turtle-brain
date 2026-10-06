@@ -1,16 +1,15 @@
 --[[ <Claude>
   mineArea: digs out a box next to the turtle and comes back to the start.
   mineBox: same digging for a box given by world coordinates (fleet jobs).
-  mineCircle: a round hole (a cylinder) given by its center and diameter.
+  mineCircle, mineSphere: a cylinder or a ball (bot/shape.lua), possibly cut
+  to a range of levels, shared among turtles by runs of x columns.
   Local frame: a = blocks ahead (toward direction), r = blocks to the right,
   l = layers above the start level. Layers are taken three at a time: the
   turtle walks the middle one and digs up and down, so a 3-deep area costs
-  one pass of fuel. A shape is rows (one per r) of cells along a: in a box
-  every row runs from 1 to length; a circle's rows (spans) have different
-  lengths, but each is unbroken and holds the door column (a = 1), so moves
-  go along rows and that column. Every move stays inside the shape, except
-  the first step in "down" mode (the block above the door, in front of the
-  turtle).
+  one pass of fuel. In a ball, a layer of the group can be wider than the
+  middle one: its extra ring is walked on that layer. Every move stays inside
+  the shape, except the first step in "down" mode (the block above the door,
+  in front of the turtle).
   Junk (bot/config.lua) is dropped into the hole after every cell. When the
   inventory fills anyway, it burns what burns; if that is not enough, it
   unloads into a chest next to the start or at home, then resumes.
@@ -21,11 +20,13 @@
 local nav = require("bot.nav")
 local inv = require("bot.inv")
 local config = require("bot.config")
+local shape = require("bot.shape")
 
 local M = {}
 
 local ORIGIN = { a = 0, r = 0, l = 0 }
 local NEIGHBOURS = { { 0, 0, 1 }, { 0, 0, -1 }, { 0, 1, 0 }, { 0, -1, 0 }, { 1, 0, 0 }, { -1, 0, 0 } }
+local BIG = 4096 -- cells listed between two yields: a big share takes seconds to list
 
 local function dist(p, q)
   return math.abs(p.a - q.a) + math.abs(p.r - q.r) + math.abs(p.l - q.l)
@@ -37,8 +38,7 @@ end
 
 -- <Claude> Cells to walk, in order: a serpentine per layer group, reversed
 -- every other group so each group starts above or below where the last ended.
--- span(k) gives the first and last a of row k.
-local function visits(span, rows, layers)
+local function visits(length, rows, layers)
   local list = {}
   for g = 1, #layers, 3 do
     local n, group = math.min(3, #layers - g + 1), {}
@@ -46,9 +46,8 @@ local function visits(span, rows, layers)
     local walk = layers[n == 3 and g + 1 or g]
     local cells = {}
     for k, r in ipairs(rows) do
-      local lo, hi = span(k)
-      for i = lo, hi do
-        local a = k % 2 == 1 and i or lo + hi - i
+      for i = 1, length do
+        local a = k % 2 == 1 and i or length + 1 - i
         cells[#cells + 1] = { a = a, r = r, l = walk, up = group[walk + 1], down = group[walk - 1] }
       end
     end
@@ -58,33 +57,108 @@ local function visits(span, rows, layers)
   return list
 end
 
--- <Claude> Cells to visit, the door (the cell the turtle enters and leaves
--- through), the number of moves, and inside(c): whether a cell of the local
--- frame is part of the shape.
--- args: length, width, layers, vertical ("down"|"up"), side ("right"|"left"|"center"),
--- spans (optional: { first a, last a } per row instead of 1..length; each must hold a = 1).
+local function moves(list, door)
+  local n = dist(ORIGIN, door) * 2 + dist(door, list[1]) + dist(list[#list], door)
+  for i = 2, #list do n = n + dist(list[i - 1], list[i]) end
+  return n
+end
+
+-- <Claude> A box in the local frame: cells to visit, the door (the cell the
+-- turtle enters and leaves through), the number of moves, and inside(c).
+-- args: length, width, layers, vertical ("down"|"up"), side ("right"|"left"|"center").
 local function layout(args)
   local rows, first = {}, ({ right = 0, left = 0, center = -math.floor((args.width - 1) / 2) })[args.side]
   for k = 1, args.width do rows[k] = first + (k - 1) * (args.side == "left" and -1 or 1) end
   local layers, entry = {}, args.vertical == "up" and 0 or -1
   for i = 1, args.layers do layers[i] = entry + (i - 1) * (args.vertical == "up" and 1 or -1) end
-  local function span(k)
-    if args.spans then return args.spans[k][1], args.spans[k][2] end
-    return 1, args.length
-  end
-  local list = visits(span, rows, layers)
+  local list = visits(args.length, rows, layers)
   local door = { a = 1, r = 0, l = entry }
-  local moves = dist(ORIGIN, door) * 2 + dist(door, list[1]) + dist(list[#list], door)
-  for i = 2, #list do moves = moves + dist(list[i - 1], list[i]) end
-  local row, low, high = {}, math.min(layers[1], layers[#layers]), math.max(layers[1], layers[#layers])
-  for k, r in ipairs(rows) do row[r] = k end
+  local r1, r2 = math.min(rows[1], rows[#rows]), math.max(rows[1], rows[#rows])
+  local l1, l2 = math.min(layers[1], layers[#layers]), math.max(layers[1], layers[#layers])
   local function inside(c)
-    local k = row[c.r]
-    if not k or c.l < low or c.l > high then return false end
-    local lo, hi = span(k)
-    return c.a >= lo and c.a <= hi
+    return c.a >= 1 and c.a <= args.length and c.r >= r1 and c.r <= r2 and c.l >= l1 and c.l <= l2
   end
-  return list, door, moves, inside
+  return list, door, moves(list, door), inside
+end
+
+-- <Claude> A round shape's share in the local frame of heading h with the
+-- start at origin (above the door). args: shape (world, bot/shape.lua) and
+-- from, to: the share's x columns, the first one nearest the door. Rows run
+-- along z (a) and the frame's r runs along x. inside(c) is the whole shape,
+-- not only the share: the turtle may cross other shares to reach its own.
+local function roundLayout(args, h, origin)
+  local s = args.shape
+  local fx, fz = nav.vector(h)
+  local rx, rz = nav.vector((h + 1) % 4)
+  local function inside(c)
+    return shape.inside(s, origin.x + c.a * fx + c.r * rx, origin.y + c.l, origin.z + c.a * fz + c.r * rz)
+  end
+  -- <Claude> Column x's run at level l, as a range of a (nil when empty).
+  local function run(x, l)
+    local z1, z2 = shape.line(s, origin.y + l, x, nil)
+    if not z1 then return nil end
+    local a1, a2 = (z1 - origin.z) * fz, (z2 - origin.z) * fz
+    return math.min(a1, a2), math.max(a1, a2)
+  end
+  local list, step = {}, args.from <= args.to and 1 or -1
+  local function add(cell)
+    list[#list + 1] = cell
+    if #list % BIG == 0 then sleep(0) end
+  end
+  local layers = {}
+  for y = shape.highest(s), shape.lowest(s), -1 do layers[#layers + 1] = y - origin.y end
+  for g = 1, #layers, 3 do
+    local n, group = math.min(3, #layers - g + 1), {}
+    for i = g, g + n - 1 do group[layers[i]] = true end
+    local walk = layers[n == 3 and g + 1 or g]
+    -- <Claude> The walked layer, serpentine, digging up and down where the shape goes on.
+    local cells, k = {}, 0
+    for x = args.from, args.to, step do
+      local lo, hi = run(x, walk)
+      if lo then
+        k = k + 1
+        local r = (x - origin.x) * rx
+        for i = lo, hi do
+          local a = k % 2 == 1 and i or lo + hi - i
+          cells[#cells + 1] = { a = a, r = r, l = walk,
+            up = group[walk + 1] and inside({ a = a, r = r, l = walk + 1 }) or nil,
+            down = group[walk - 1] and inside({ a = a, r = r, l = walk - 1 }) or nil }
+        end
+      end
+    end
+    local reverse = (g - 1) / 3 % 2 == 1
+    for i = 1, #cells do add(cells[reverse and #cells + 1 - i or i]) end
+    -- <Claude> Rings: blocks of the group's other layers beyond the walked layer's run.
+    for _, l in ipairs({ walk + 1, walk - 1 }) do
+      if group[l] then
+        k = 0
+        for x = args.from, args.to, step do
+          local lo, hi = run(x, l)
+          if lo then
+            local wlo, whi = run(x, walk)
+            local parts = {}
+            if not wlo then
+              parts[1] = { lo, hi }
+            else
+              if lo < wlo then parts[#parts + 1] = { lo, math.min(hi, wlo - 1) } end
+              if hi > whi then parts[#parts + 1] = { math.max(lo, whi + 1), hi } end
+            end
+            if #parts > 0 then
+              k = k + 1
+              local r = (x - origin.x) * rx
+              if k % 2 == 0 then parts = { parts[2] or parts[1], parts[2] and parts[1] or nil } end
+              for _, p in ipairs(parts) do
+                for i = p[1], p[2] do add({ a = k % 2 == 1 and i or p[1] + p[2] - i, r = r, l = l }) end
+              end
+            end
+          end
+        end
+      end
+    end
+  end
+  local door = { a = 1, r = 0, l = -1 }
+  if #list == 0 then return list, door, 0, inside end
+  return list, door, moves(list, door), inside
 end
 
 local function fuelError(need)
@@ -100,14 +174,20 @@ local function dig(h, args, ctx)
   local startHeading, origin = nav.heading(), nav.pos()
   if saved then h, args, startHeading, origin = saved.h, saved.args, saved.startHeading, saved.origin end
   if not nav.heading() then return { ok = false, error = "heading unknown (no GPS fix to calibrate it)" } end
-  local shape = { length = args.length, width = args.width, layers = args.layers, vertical = args.vertical,
-                  side = args.side, spans = args.spans }
 
   local fx, fz = nav.vector(h)
   local rx, rz = nav.vector((h + 1) % 4)
   local axes = { a = fx ~= 0 and "x" or "z", r = rx ~= 0 and "x" or "z", l = "y" }
 
-  local list, door, _, inside = layout(shape)
+  local round = args.shape ~= nil
+  local list, door, _, inside
+  if round then
+    list, door, _, inside = roundLayout(args, h, origin)
+  else
+    args = { length = args.length, width = args.width, layers = args.layers, vertical = args.vertical, side = args.side }
+    list, door, _, inside = layout(args)
+  end
+  if #list == 0 then return { ok = true, mined = 0 } end
   local first = saved and saved.next or 1
   local outside = false -- on a trip away from the shape (home, or back to the start after a reboot)
   local function exitCost(c) return dist(c, door) + dist(door, ORIGIN) end
@@ -123,15 +203,34 @@ local function dig(h, args, ctx)
   end
   -- <Claude> From a cell of the shape to another, never out of it. A box
   -- holds every path between its cells, so `order` (the one through dug
-  -- space) is used. With spans it goes across rows along the column it is in
-  -- or the one it goes to, whichever is inside, else by the door column.
+  -- space) is used. A round shape is walked a block at a time toward c,
+  -- along an axis whose next block is inside (the one it is going along
+  -- first): in a ball, cylinder or box, cut flat or not, there always is
+  -- one. A step toward the center never leaves the shape, and when every
+  -- step toward c moves away from the center, c is further out than the new
+  -- block on each axis, so the new block is no further out than c.
+  -- Straight runs are walked with one goTo each.
   local function walk(c, order)
-    if not shape.spans then return go(c, order) end
-    local p = here()
-    if inside({ a = p.a, r = c.r, l = c.l }) then return go(c, "lra") end
-    if inside({ a = c.a, r = p.r, l = c.l }) then return go(c, "lar") end
-    go({ a = door.a, r = p.r, l = c.l }, "la")
-    go(c, "ra")
+    if not round then return go(c, order) end
+    local p, axis = here(), nil
+    while dist(p, c) > 0 do
+      local nextAxis
+      for _, ax in ipairs({ axis or "l", "l", "r", "a" }) do
+        if not nextAxis and p[ax] ~= c[ax] then
+          local q = { a = p.a, r = p.r, l = p.l }
+          q[ax] = q[ax] + (c[ax] > p[ax] and 1 or -1)
+          if inside(q) then nextAxis = ax end
+        end
+      end
+      if not nextAxis then
+        if axis then go(p, axis) end
+        return go(c, order) -- only from outside the shape (the approach above the door)
+      end
+      if axis and nextAxis ~= axis then go(p, axis) end
+      axis = nextAxis
+      p[axis] = p[axis] + (c[axis] > p[axis] and 1 or -1)
+    end
+    if axis then go(p, axis) end
   end
 
   -- <Claude> After a reboot the turtle can be anywhere on its route: in the
@@ -170,7 +269,7 @@ local function dig(h, args, ctx)
   local function mined() return mined0 + nav.dug - dug0 end
   local function checkpoint(next)
     if ctx and ctx.save then
-      ctx.save({ h = h, args = shape, origin = origin, startHeading = startHeading, next = next,
+      ctx.save({ h = h, args = args, origin = origin, startHeading = startHeading, next = next,
                  mined = mined(), trips = trips, junked = junked })
     end
   end
@@ -297,89 +396,48 @@ function M.mineBox(a, ctx)
   return dig(h, args, ctx)
 end
 
--- <Claude> A circle d blocks wide, column by column: for each x offset 0..d-1,
--- its first and last z offset. A block is in when its distance to the center
--- is at most (d - 1) / 2, so odd diameters have a one-block bump at each of
--- the four ends (as on the 75-block chart this was made from). Counted in half
--- blocks so even diameters work too; they get two-block bumps.
-function M.circle(d)
-  local c = d - 1
-  local limit = c * c + (d % 2 == 0 and 1 or 0)
-  local cols = {}
-  for i = 0, c do
-    local u = 2 * i - c
-    local s = limit - u * u
-    local m = math.floor(math.sqrt(s))
-    while m * m > s do m = m - 1 end
-    while (m + 1) * (m + 1) <= s do m = m + 1 end
-    cols[i + 1] = { math.ceil((c - m) / 2), math.floor((c + m) / 2) }
-  end
-  return cols
-end
-
--- <Claude> Share `part` of `parts` of the circle cols: a run of columns with
--- about 1/parts of its blocks (edge columns are short, so edge shares are
--- wider). Returns the first and last column offset, or nil when there are
--- more parts than columns and this one gets none. Every turtle of a fleet
--- computes the same split, so each column is dug by exactly one of them.
-function M.share(cols, part, parts)
-  local n = #cols
-  parts = math.min(parts, n)
-  if part > parts then return nil end
-  local function size(i) return cols[i][2] - cols[i][1] + 1 end
-  local total = 0
-  for i = 1, n do total = total + size(i) end
-  local from, sum = 1, 0
-  for k = 1, parts do
-    local to = from
-    sum = sum + size(to)
-    if k == parts then to = n end
-    while to < n - (parts - k) and sum + size(to + 1) / 2 <= total * k / parts do
-      to = to + 1
-      sum = sum + size(to)
-    end
-    if k == part then return from - 1, to - 1 end
-    from = to + 1
-  end
-end
-
--- <Claude> args: x, z (center block), diameter, y1, y2 (levels, any order),
--- part, parts (this turtle's share, see M.share). Rows run along z, one per
--- x column of the share; the turtle enters above the share's edge column
--- nearest to it, on the circle's middle row (in every column), digs top-down
--- and ends at that entry point.
-function M.mineCircle(a, ctx)
-  if ctx and ctx.state then return dig(nil, nil, ctx) end -- resuming: frame and spans are saved
-  if a.part > a.parts then return { ok = false, error = "part must be at most parts" } end
-  local d = a.diameter
-  local cols = M.circle(d)
-  local from, to = M.share(cols, a.part, a.parts)
+-- <Claude> Share part of parts of a round shape s (bot/shape.lua): a run of
+-- x columns with about as many blocks as the others. Rows run along z. The
+-- turtle enters from above the door: the top level's block on the middle row
+-- nearest its share (a ball cut below its middle has its widest level on
+-- top, so that is in the share; a whole ball's top is its pole, which every
+-- share goes through). It digs top-down and ends at that entry point.
+local function mineRound(s, part, parts, ctx)
+  if part > parts then return { ok = false, error = "part must be at most parts" } end
+  local from, to = shape.share(shape.counts(s, "solid", "x"), part, parts)
   if not from then return { ok = true, mined = 0 } end -- more parts than columns: nothing left for this one
-  local lo = { x = a.x - math.floor((d - 1) / 2), z = a.z - math.floor((d - 1) / 2) }
-  local mid = lo.z + math.floor((d - 1) / 2)
-  local top, bottom = math.max(a.y1, a.y2), math.min(a.y1, a.y2)
+  local x1, x2 = s.x1 + from, s.x1 + to
+  local top = shape.highest(s)
+  local zmid = math.floor(s.cz / 2) -- the middle row: in every column of every level
   local p = nav.pos()
-  local x1, x2 = lo.x + from, lo.x + to
   local near = math.abs(p.x - x1) <= math.abs(p.x - x2) and x1 or x2
-  local inward = near == x1 and 1 or -1
-  local h = p.z <= mid and 2 or 0 -- rows run away from the turtle: south if it is north of the middle row
+  local xa, xb = shape.line(s, top, nil, zmid)
+  local h = p.z <= zmid and 2 or 0 -- rows run away from the turtle: south if it is north of the middle row
   local _, fz = nav.vector(h)
-  local rx = nav.vector((h + 1) % 4)
-  local spans = {}
-  for k = 1, to - from + 1 do
-    local col = cols[near + (k - 1) * inward - lo.x + 1]
-    local a1, a2 = 1 + (lo.z + col[1] - mid) * fz, 1 + (lo.z + col[2] - mid) * fz
-    spans[k] = { math.min(a1, a2), math.max(a1, a2) }
-  end
-  local args = { width = to - from + 1, layers = top - bottom + 1, vertical = "down",
-                 side = rx == inward and "right" or "left", spans = spans }
-  local entry = { x = near, y = top + 1, z = mid - fz }
-  local _, _, moves = layout(args)
+  local entry = { x = math.max(xa, math.min(xb, near)), y = top + 1, z = zmid - fz }
+  local args = { shape = s, from = near, to = near == x1 and x2 or x1 }
+  local _, _, moves = roundLayout(args, h, entry)
   local need = nav.distance(p, entry) + moves + config.fuelMargin
   if not nav.refuel(need) then return fuelError(need) end
   local ok, err = nav.patiently(function() return nav.goTo(entry) end)
-  if not ok then return { ok = false, error = "could not reach the circle: " .. err } end
+  if not ok then return { ok = false, error = "could not reach the shape: " .. err } end
   return dig(h, args, ctx)
+end
+
+-- <Claude> args: x, z (center block), diameter, y1, y2 (levels, any order),
+-- part, parts (this turtle's share).
+function M.mineCircle(a, ctx)
+  if ctx and ctx.state then return dig(nil, nil, ctx) end -- resuming: frame and shape are saved
+  return mineRound(shape.cylinder(a.x, a.z, a.diameter, a.y1, a.y2), a.part, a.parts, ctx)
+end
+
+-- <Claude> args: x, y, z (center block), diameter, top, bottom (optional:
+-- only levels bottom..top), part, parts.
+function M.mineSphere(a, ctx)
+  if ctx and ctx.state then return dig(nil, nil, ctx) end
+  local s = shape.cut(shape.ball(a.x, a.y, a.z, a.diameter), a.top, a.bottom)
+  if not s then return { ok = false, error = "no level of the sphere is between top and bottom" } end
+  return mineRound(s, a.part, a.parts, ctx)
 end
 
 return M

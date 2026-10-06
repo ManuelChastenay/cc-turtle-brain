@@ -2,8 +2,9 @@
   Skills the planner can put in a plan. Each is declared once:
     { name, doc, args = { { argName, type, default } }, run = function(args, ctx) -> result,
       split = function(args, positions) -> argsPerTurtle }   -- optional, fleet only
-  An arg with a default is optional; types are listed in bot/plan.lua. An
-  arg marked hidden = true is left out of the prompt (set by split).
+  An arg with a default, or marked optional = true (nil when left out), may
+  be left out; types are listed in bot/plan.lua. An arg marked hidden = true
+  is left out of the prompt (set by split).
   run returns { ok = true, ... } or { ok = false, error = "..." }; extra
   scalar fields show up in the run summary. A worker can reboot in the
   middle of a step and run it again: ctx.state is what the step last passed
@@ -18,7 +19,8 @@
 local function lazy(name)
   return setmetatable({}, { __index = function(_, key) return require(name)[key] end })
 end
-local nav, inv, mine = lazy("bot.nav"), lazy("bot.inv"), lazy("bot.mine")
+local nav, inv, mine, build = lazy("bot.nav"), lazy("bot.inv"), lazy("bot.mine"), lazy("bot.build")
+local shape = require("bot.shape") -- pure math: the brain uses it to split builds
 
 local M = {}
 
@@ -49,28 +51,61 @@ local function splitBox(a, positions)
   return parts
 end
 
--- <Claude> Shares a mineCircle among the group: share k of n (n at most the
--- diameter; bot/mine.lua turns it into a run of x columns), turtles sorted
--- west to east getting the shares in that order. A step that is already a
--- share goes to the first turtle as it is. Runs on the brain.
-local function splitCircle(a, positions)
+-- <Claude> Indexes of positions (or of the given subset) sorted along axis, ties in list order.
+local function sorted(positions, axis, subset)
   local order = {}
-  for i = 1, #positions do order[i] = i end
+  for i, p in ipairs(subset or positions) do order[i] = subset and p or i end
   table.sort(order, function(i, j)
-    local pi, pj = positions[i].x, positions[j].x
+    local pi, pj = positions[i][axis], positions[j][axis]
     return pi < pj or (pi == pj and i < j)
   end)
-  local parts = {}
+  return order
+end
+
+local function share(a, k, n)
+  local part = {}
+  for key, value in pairs(a) do part[key] = value end
+  part.part, part.parts = k, n
+  return part
+end
+
+-- <Claude> Shares a mineCircle or mineSphere among the group: share k of n
+-- (n at most the diameter; bot/mine.lua turns it into a run of x columns),
+-- turtles sorted west to east getting the shares in that order. A step that
+-- is already a share goes to the first turtle as it is. Runs on the brain.
+local function splitRound(a, positions)
+  local order, parts = sorted(positions, "x"), {}
   if a.parts > 1 then
     parts[order[1]] = a
     return parts
   end
-  for k = 1, math.min(#positions, a.diameter) do
-    local part = {}
-    for key, value in pairs(a) do part[key] = value end
-    part.part, part.parts = k, math.min(#positions, a.diameter)
-    parts[order[k]] = part
+  local n = math.min(#positions, a.diameter)
+  for k = 1, n do parts[order[k]] = share(a, k, n) end
+  return parts
+end
+
+-- <Claude> Shares a build among the group (tiles, bot/build.lua): turtles
+-- sorted along the longer side get the runs of columns in that order; for
+-- hollow and walls, the turtles on the low side across take the low half.
+-- A step that is already a share goes to the first turtle. Runs on the brain.
+local function splitBuild(a, positions)
+  local s = a.diameter and shape.ball(a.x, a.y, a.z, a.diameter) or shape.box(a.x1, a.y1, a.z1, a.x2, a.y2, a.z2)
+  local u, v = shape.axes(s)
+  local order, parts = sorted(positions, u), {}
+  if a.parts > 1 then
+    parts[order[1]] = a
+    return parts
   end
+  local halves = a.fill ~= "solid"
+  local n = math.min(#positions, (s[u .. "2"] - s[u .. "1"] + 1) * (halves and 2 or 1))
+  if not halves or n < 2 then
+    for k = 1, n do parts[order[k]] = share(a, k, n) end
+    return parts
+  end
+  local low = shape.lowHalf(n)
+  local byV = sorted(positions, v, { table.unpack(order, 1, n) })
+  for k, i in ipairs(sorted(positions, u, { table.unpack(byV, 1, low) })) do parts[i] = share(a, k, n) end
+  for k, i in ipairs(sorted(positions, u, { table.unpack(byV, low + 1, n) })) do parts[i] = share(a, low + k, n) end
   return parts
 end
 
@@ -118,7 +153,47 @@ M.list = {
       { "part", "count", 1, hidden = true }, { "parts", "count", 1, hidden = true },
     },
     run = function(a, ctx) return mine.mineCircle(a, ctx) end,
-    split = splitCircle,
+    split = splitRound,
+  },
+  {
+    name = "mineSphere",
+    doc = "Dig out a ball diameter blocks wide centered on block x,y,z (radius r = diameter 2r+1), only"
+      .. " the levels from top down to bottom when given. Enters from above and ends there.",
+    args = {
+      { "x", "int" }, { "y", "int" }, { "z", "int" }, { "diameter", "count" },
+      { "top", "int", optional = true }, { "bottom", "int", optional = true },
+      { "part", "count", 1, hidden = true }, { "parts", "count", 1, hidden = true },
+    },
+    run = function(a, ctx) return mine.mineSphere(a, ctx) end,
+    split = splitRound,
+  },
+  {
+    name = "buildSphere",
+    doc = "Build a ball of one block (block = its id, e.g. minecraft:stone_bricks) centered as for"
+      .. " mineSphere: fill=hollow (a shell) or solid; top/bottom keep only those levels (an open dome"
+      .. " or bowl). Blocks come from supply: home (a chest next to each turtle's home) or \"x,y,z\" of"
+      .. " a chest, taken from above it; it must hold only that block (and fuel). Ends above the ball.",
+    args = {
+      { "x", "int" }, { "y", "int" }, { "z", "int" }, { "diameter", "count" }, { "block", "str" },
+      { "fill", "hollow|solid|walls", "hollow" }, { "top", "int", optional = true },
+      { "bottom", "int", optional = true }, { "supply", "str", "home" },
+      { "part", "count", 1, hidden = true }, { "parts", "count", 1, hidden = true },
+    },
+    run = function(a, ctx) return build.sphere(a, ctx) end,
+    split = splitBuild,
+  },
+  {
+    name = "buildBox",
+    doc = "Build a box of one block between two corners: fill=hollow (walls, floor and ceiling), walls"
+      .. " (no floor or ceiling) or solid; corners on one level make a flat rectangle. block and supply"
+      .. " as for buildSphere. Ends above the box.",
+    args = {
+      { "x1", "int" }, { "y1", "int" }, { "z1", "int" }, { "x2", "int" }, { "y2", "int" }, { "z2", "int" },
+      { "block", "str" }, { "fill", "hollow|solid|walls", "hollow" }, { "supply", "str", "home" },
+      { "part", "count", 1, hidden = true }, { "parts", "count", 1, hidden = true },
+    },
+    run = function(a, ctx) return build.box(a, ctx) end,
+    split = splitBuild,
   },
   {
     name = "goTo",

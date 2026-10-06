@@ -31,6 +31,10 @@ local pos, heading, home, hasGps = { x = 0, y = 0, z = 0 }, nil, nil, false
 local calibrating = nil
 local turning = nil -- true while a turn is under way
 M.dug = 0 -- blocks dug since boot; skills report the difference
+-- <Claude> A block name never dug while it is set (bot/build.lua: its own
+-- blocks, so no move can break the structure). Cleared by init, which the
+-- worker runs again after a stop cuts a build off.
+M.keep = nil
 
 local function save()
   local f = fs.open(config.statePath, "w")
@@ -218,7 +222,11 @@ end
 -- consistent, i.e. no extra moves in the middle of a dig, and no chance for
 -- reboots in quick succession to keep cutting calibrations off.
 function M.init(trustSaved)
+  M.keep = nil
   local saved = load()
+  -- <Claude> Before anything is saved: a calibration saves, and a reboot in
+  -- the middle of it must not leave a state file without home.
+  home = type(saved.home) == "table" and saved.home or nil
   local fix = locate()
   hasGps = fix ~= nil
   local undo = type(saved.calibrating) == "table" and saved.calibrating or nil
@@ -244,7 +252,7 @@ function M.init(trustSaved)
     pos = saved.pos or pos
     heading = saved.heading or 0
   end
-  home = saved.home or { x = pos.x, y = pos.y, z = pos.z, heading = heading }
+  home = home or { x = pos.x, y = pos.y, z = pos.z, heading = heading }
   save()
 end
 
@@ -296,7 +304,7 @@ function M.dig(side)
     local name = found and type(block) == "table" and block.name
     if name then
       if name:find("computercraft:turtle", 1, true) then return false, TURTLE_IN_WAY end
-      if matches(name, config.protect) then return false, "protected block in the way: " .. name end
+      if matches(name, config.protect) or name == M.keep then return false, "protected block in the way: " .. name end
       local ok, reason = DIG[side]()
       if ok then
         M.dug = M.dug + 1
