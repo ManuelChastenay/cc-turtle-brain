@@ -173,6 +173,7 @@ Four computers with wireless/ender modems at known coordinates, not all in one p
 | `fuelItems` | coal, coke, lava_bucket, blaze_rod, dried_kelp_block | Burned for fuel (substring match) |
 | `keepFuel` | 64 | Fuel items kept when unloading (none if fuel is unlimited) |
 | `fuelMargin` | 20 | Extra fuel kept on top of a job's need |
+| `fuelForWholeDig` | false | false: a dig starts with whatever fuel it has, stops back at its start when low ("fuel ran low"), and `/retry` carries on after refuelling. true: refuse to start without the fuel for the whole dig |
 | `junk` | cobblestone and mossy cobblestone (+ stairs, slab, wall), cobbled deepslate, dirt, gravel, andesite, diorite, granite, tuff, netherrack, raw copper, `xycraft_world:kivi` | Exact names. Never stored: dropped into the hole after every mined cell (about 20% slower digging), after a trip that dug through something, and before unloading. `{}` keeps everything. |
 | `protect` | `computercraft:`, chest, barrel, shulker_box, furnace, `_door`, glass, `_bed` | Never dug, even in the way |
 | `turtleWaits` | 20 | About 1 s retries when another turtle blocks the way |

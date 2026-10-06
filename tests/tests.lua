@@ -128,14 +128,38 @@ test("bedrock: fails with reason, returns to start", function()
   eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0) eq(sim.t.h, 0)
 end)
 
-test("not enough fuel: refuses before moving", function()
+test("not enough fuel, fuelForWholeDig: refuses before moving", function()
   sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 30 } }
   saveState(0)
+  require("bot.config").fuelForWholeDig = true
   local nav, mine = require("bot.nav"), require("bot.mine")
   nav.init()
   local r = mine.mineArea({ direction = "north", length = 6, width = 6, layers = 3, vertical = "down", side = "right" })
   eq(r.ok, false) truthy(r.error:find("needs about"), r.error)
+  r = mine.mineSphere({ x = 0, y = 20, z = -10, diameter = 7, part = 1, parts = 1 })
+  eq(r.ok, false) truthy(r.error:find("needs about"), r.error)
   eq(sim.moves, 0)
+end)
+
+test("not enough fuel for the whole dig: digs what it can, stops at its start, carries on once refuelled", function()
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 30 } }
+  saveState(0)
+  local nav, mine = require("bot.nav"), require("bot.mine")
+  nav.init()
+  local args = { direction = "north", length = 6, width = 6, layers = 3, vertical = "down", side = "right" }
+  local saved
+  local function ctx(state) return { state = state, save = function(s) saved = s end } end
+  local r = mine.mineArea(args, ctx())
+  eq(r.ok, false) truthy(r.error:find("fuel ran low", 1, true), r.error)
+  truthy(r.mined > 0, "dug what it could first")
+  eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0)
+  sim.t.fuel = 5000
+  r = mine.mineArea(args, ctx(saved))
+  truthy(r.ok, tostring(r.error))
+  local box = boxCells({ x = 0, y = 31, z = 0 }, 0, 6, 6, 3, "down", "right")
+  for k in pairs(box) do eq(sim.get(k:match("(-?%d+),(-?%d+),(-?%d+)")), nil, "box cell " .. k) end
+  for _, k in ipairs(sim.dugLog) do truthy(box[k], "collateral dig at " .. k) end
+  eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0)
 end)
 
 test("coal in inventory is burned when needed, not all of it", function()

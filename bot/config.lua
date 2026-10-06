@@ -28,6 +28,11 @@ return {
   statePath  = "/nav_state.json", -- position, heading and home; survives reboots
   fuelItems  = { "coal", "coke", "lava_bucket", "blaze_rod", "dried_kelp_block" },
   fuelMargin = 20,                -- fuel kept on top of what a job needs
+  -- <Claude> true: a dig refuses to start without the fuel for all of it.
+  -- false: it starts with what it has (enough to reach the shape), digs
+  -- until the fuel left only gets it back to its start, stops there with
+  -- "fuel ran low", and `retry` carries on once it has fuel again.
+  fuelForWholeDig = false,
   keepFuel   = 64,                -- fuel items kept when unloading (64 coal = 5120 fuel); none if fuel is unlimited
   junk       = junk,
   protect    = {                  -- never dug, even when in the way

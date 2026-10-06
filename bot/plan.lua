@@ -147,7 +147,7 @@ function M.format(step)
 end
 
 -- <Claude> Steps typed by hand (the `do` command, no LLM), separated by ";":
---   "mineSphere 0 100 0 200 bottom=75; goHome; unload"
+--   "mineSphere 0 100 0 200 top=75; goHome; unload"
 -- Bare values fill the skill's shown args in order, skipping those given as
 -- name=value. Skill names ignore case. Returns raw steps (as the LLM would
 -- send them, already checked) | nil, err.

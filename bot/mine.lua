@@ -260,8 +260,12 @@ local function dig(h, args, ctx)
   end
 
   local need, last = config.fuelMargin, here()
-  for k = first, #list do need, last = need + dist(last, list[k]), list[k] end
-  need = need + exitCost(last)
+  if config.fuelForWholeDig then
+    for k = first, #list do need, last = need + dist(last, list[k]), list[k] end
+    need = need + exitCost(last)
+  else -- only back to the start (a retry from home); the check before each cell does the rest
+    need = need + dist(last, ORIGIN)
+  end
   if not nav.refuel(need) then return fuelError(need) end
 
   local mined0, dug0 = saved and saved.mined or 0, nav.dug
@@ -322,7 +326,7 @@ local function dig(h, args, ctx)
         local atStart = dist(here(), ORIGIN) == 0
         local cost = (atStart and exitCost(v) or dist(here(), v)) + exitCost(v) -- get there and back
         if nav.fuel() < cost and not nav.refuel(cost + config.fuelMargin) then
-          error("fuel ran low", 0)
+          error("fuel ran low: refuel, then retry", 0)
         end
         if atStart then
           go(door, "al")
@@ -389,7 +393,7 @@ function M.mineBox(a, ctx)
   }
   local entry = { x = cx - fx, y = hi.y + 1, z = cz - fz }
   local _, _, moves = layout(args)
-  local need = nav.distance(p, entry) + moves + config.fuelMargin
+  local need = nav.distance(p, entry) + (config.fuelForWholeDig and moves or 0) + config.fuelMargin
   if not nav.refuel(need) then return fuelError(need) end
   local ok, err = nav.patiently(function() return nav.goTo(entry) end)
   if not ok then return { ok = false, error = "could not reach the box: " .. err } end
@@ -416,8 +420,8 @@ local function mineRound(s, part, parts, ctx)
   local _, fz = nav.vector(h)
   local entry = { x = math.max(xa, math.min(xb, near)), y = top + 1, z = zmid - fz }
   local args = { shape = s, from = near, to = near == x1 and x2 or x1 }
-  local _, _, moves = roundLayout(args, h, entry)
-  local need = nav.distance(p, entry) + moves + config.fuelMargin
+  local need = nav.distance(p, entry) + config.fuelMargin
+  if config.fuelForWholeDig then need = need + select(3, roundLayout(args, h, entry)) end
   if not nav.refuel(need) then return fuelError(need) end
   local ok, err = nav.patiently(function() return nav.goTo(entry) end)
   if not ok then return { ok = false, error = "could not reach the shape: " .. err } end
