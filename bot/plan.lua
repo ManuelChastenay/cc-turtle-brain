@@ -5,7 +5,9 @@
   (bot/skills.lua) generates the prompt catalog, the tool schema and the
   argument checks, so adding a skill is one table entry.
   Arg types: "int", "count" (integer >= 1), "str", or an enum "a|b|c" where
-  "dir" stands for the 8 horizontal directions.
+  "dir" stands for the 8 horizontal directions. Hidden args (hidden = true,
+  with a default) are checked but not shown to the LLM: the fleet's split
+  sets them.
 ]]
 local config = require("bot.config")
 
@@ -60,7 +62,9 @@ function M.catalog(skills)
   for _, skill in ipairs(skills) do
     local params = {}
     for _, spec in ipairs(skill.args or {}) do
-      params[#params + 1] = spec[3] ~= nil and ("%s=%s"):format(spec[1], tostring(spec[3])) or spec[1]
+      if not spec.hidden then
+        params[#params + 1] = spec[3] ~= nil and ("%s=%s"):format(spec[1], tostring(spec[3])) or spec[1]
+      end
     end
     lines[#lines + 1] = ("- %s(%s): %s"):format(skill.name, table.concat(params, ", "), skill.doc)
   end
@@ -75,15 +79,17 @@ function M.stepSchema(skills)
   for _, skill in ipairs(skills) do
     table.insert(props.skill.enum, skill.name)
     for _, spec in ipairs(skill.args or {}) do
-      local values = enum(spec[2])
-      local prop = props[spec[1]]
-      if not prop then
-        prop = { type = (spec[2] == "int" or spec[2] == "count") and "integer" or "string" }
-        props[spec[1]] = prop
-      end
-      for _, v in ipairs(values or {}) do
-        prop.enum = prop.enum or {}
-        if not contains(prop.enum, v) then table.insert(prop.enum, v) end
+      if not spec.hidden then
+        local values = enum(spec[2])
+        local prop = props[spec[1]]
+        if not prop then
+          prop = { type = (spec[2] == "int" or spec[2] == "count") and "integer" or "string" }
+          props[spec[1]] = prop
+        end
+        for _, v in ipairs(values or {}) do
+          prop.enum = prop.enum or {}
+          if not contains(prop.enum, v) then table.insert(prop.enum, v) end
+        end
       end
     end
   end

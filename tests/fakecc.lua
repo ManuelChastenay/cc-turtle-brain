@@ -154,7 +154,7 @@ function sim.reset(o)
   sim.now, sim.events, sim.timers, sim.lastTimer = 0, {}, {}, 0
   sim.sent = {}            -- every rednet message sent: { to, msg, proto }
   sim.monitors = {}        -- attached fake monitors (sim.screen), found by peripheral.find("monitor")
-  sim.onSend, sim.onIdle, sim.onSleep, sim.onMove = nil, nil, nil, nil
+  sim.onSend, sim.onIdle, sim.onSleep, sim.onMove, sim.onDetect = nil, nil, nil, nil, nil
   sim.t = newTurtle(sim.id, o.turtle)
   sim.files = sim.t.files
   sim.turtles = { sim.t }
@@ -243,7 +243,14 @@ local function move(t, side)
   return true
 end
 
-local function detect(t, side) return solid(sim.get(target(t, side))) end
+-- sim.onDetect(t, x, y, z) runs after the look: in CC the next command comes
+-- a tick later, so a turtle seen at x,y,z may have moved off by then.
+local function detect(t, side)
+  local x, y, z = target(t, side)
+  local seen = solid(sim.get(x, y, z))
+  if sim.onDetect then sim.onDetect(t, x, y, z) end
+  return seen
+end
 
 local function inspect(t, side)
   local name = sim.get(target(t, side))
@@ -288,8 +295,8 @@ local function drop(t, side, count)
 end
 
 -- Turtle API for whichever turtle get() returns. Commands that take a tick
--- in CC yield until a turtle_response event (inside coroutines), so other
--- coroutines and turtles run in between, like in the game.
+-- in CC (detect and inspect too) yield until a turtle_response event (inside
+-- coroutines), so other coroutines and turtles run in between, like in the game.
 local function makeTurtle(get)
   local api = {
     forward = function() return move(get(), "front") end,
@@ -341,13 +348,18 @@ local function makeTurtle(get)
       return true
     end,
   }
+  -- Looks (detect, inspect) take a tick too but change nothing: not counted as actions.
+  local looks = { detect = true, detectUp = true, detectDown = true, inspect = true, inspectUp = true, inspectDown = true }
   for _, name in ipairs({ "forward", "back", "up", "down", "turnLeft", "turnRight", "dig", "digUp", "digDown",
-      "attack", "attackUp", "attackDown", "drop", "dropUp", "dropDown", "refuel" }) do
+      "attack", "attackUp", "attackDown", "drop", "dropUp", "dropDown", "refuel",
+      "detect", "detectUp", "detectDown", "inspect", "inspectUp", "inspectDown" }) do
     local fn = api[name]
     api[name] = function(...)
       local r = table.pack(fn(...))
-      sim.actions = sim.actions + 1 -- a reboot "at" an action: it happened, the program never heard back
-      if sim.terminateAtAction and sim.actions >= sim.terminateAtAction then error("Terminated", 0) end
+      if not looks[name] then
+        sim.actions = sim.actions + 1 -- a reboot "at" an action: it happened, the program never heard back
+        if sim.terminateAtAction and sim.actions >= sim.terminateAtAction then error("Terminated", 0) end
+      end
       if not isMain() then
         os.queueEvent("turtle_response")
         os.pullEvent("turtle_response")

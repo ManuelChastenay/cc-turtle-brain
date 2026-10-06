@@ -2,14 +2,14 @@
   Fleet dashboard daemon (`fleet dash`, fleet.lua starts it). One program on
   the brain computer that stays up:
     - a monitor (if attached) shows every turtle: state, position, fuel, the
-      step it is on, the event log, and touch buttons (STOP ALL, HOME ALL, a
-      stop per busy turtle). Without a monitor the dashboard takes the
-      terminal.
+      step it is on, the event log, and touch buttons (STOP ALL, HOME ALL,
+      REFUEL ALL, SET HOME, a stop per busy turtle). Without a monitor the
+      dashboard takes the terminal.
     - the terminal's last line is a prompt: text is a goal for the LLM
       (the same flow as `fleet <goal>`), /commands run in Lua at once.
   Coroutines under parallel: listener (rednet -> bot/registry), ticker (poll
   the turtles with a quick hello, redraw every second), screen, keyboard,
-  touches and runner (goals, home, refuel, update, resume: one at a time,
+  touches and runner (goals, home, refuel, set home, update, resume: one at a time,
   because the fleet saves a single job). A blocking http.post in the runner
   only stops the runner: every other coroutine still gets every event.
   The drawing is bot/ui.lua, the state bot/registry.lua.
@@ -30,12 +30,14 @@ local M = {}
 
 M.POLL_EVERY = 5 -- seconds between quick hellos
 local HOME_WAIT = 15 -- seconds a stopped turtle gets to go idle before the goHome plan
+local CONFIRM_WAIT = 5 -- seconds for the second tap on SET HOME
 local LOG_WIDTH = 44
 
 local HELP = {
   "/stop [id]  stop every turtle and the goal, or one turtle",
   "/home [id]  stop everything, then send turtles home",
   "/refuel [id] idle turtles burn what burns",
+  "/sethome [id] idle turtles: home = where they are",
   "/update [id] newest code here + idle turtles",
   "/resume     wait again for an interrupted job",
   "/scale n    monitor text scale, 0.5 to 5",
@@ -79,6 +81,7 @@ function M.run(opts)
   local editor = { text = "", pos = 0, history = {}, hist = nil }
   local feedback = "type a goal, or /help"
   local queue, pending, cancelled = {}, 0, false
+  local armed = nil -- os.clock() until which a second SET HOME tap counts
 
   local monitor = peripheral.find("monitor")
   local monName, monLayout
@@ -103,7 +106,7 @@ function M.run(opts)
 
   local function draw()
     local view = reg.view(os.clock(), { llm = state.llm, calls = state.calls, tokensIn = state.tokensIn,
-      tokensOut = state.tokensOut, goal = state.goal })
+      tokensOut = state.tokensOut, goal = state.goal, confirm = armed and os.clock() < armed and "setHomeAll" or nil })
     if monitor then monLayout = ui.draw(monitor, view) end
     if installing then return end
     local w, h = term.getSize()
@@ -272,15 +275,21 @@ function M.run(opts)
     report(fleet.runSteps(skills, turtles, ids, { { skill = "goHome" } }, onEvent, "go home"))
   end
 
-  -- <Claude> The idle turtles in job.ids (all if nil) burn what burns. Busy ones are left alone.
-  function JOBS.refuel(job)
-    state.goal, state.llm = "refuel", "waiting"
+  -- <Claude> One step for the idle turtles in job.ids (all if nil). Busy ones are left alone.
+  local function idleStep(job, what, skill)
+    state.goal, state.llm = what, "waiting"
     local turtles = fleet.discover(2)
     local ids, busy = fleet.idle(turtles, job.ids)
-    if busy > 0 then say(("refuel: %d busy turtle(s) left alone"):format(busy)) end
-    if #ids == 0 then say("no idle turtle to refuel") return end
-    report(fleet.runSteps(skills, turtles, ids, { { skill = "refuel" } }, onEvent, "refuel"))
+    if busy > 0 then say(("%s: %d busy turtle(s) left alone"):format(what, busy)) end
+    if #ids == 0 then say(("%s: no idle turtle"):format(what)) return end
+    report(fleet.runSteps(skills, turtles, ids, { { skill = skill } }, onEvent, what))
   end
+
+  -- <Claude> Burn what burns.
+  function JOBS.refuel(job) idleStep(job, "refuel", "refuel") end
+
+  -- <Claude> Home becomes where each turtle is, facing the way it faces.
+  function JOBS.sethome(job) idleStep(job, "set home", "setHome") end
 
   -- <Claude> Like `fleet update`: this computer installs the newest commit
   -- (its output shows on the terminal meanwhile; the monitor stays up), then
@@ -372,6 +381,19 @@ function M.run(opts)
     if pending > 0 then say("refuel: wait for the current job or stop it") else enqueue({ kind = "refuel" }) end
   end
 
+  -- <Claude> SET HOME moves every idle turtle's home to where it is, which is
+  -- hard to undo: the button asks for a second tap within CONFIRM_WAIT s.
+  local function setHomeAll()
+    if pending > 0 then say("set home: wait for the current job or stop it") return end
+    if not (armed and os.clock() < armed) then
+      armed = os.clock() + CONFIRM_WAIT
+      say(("tap SET HOME again within %d s: each idle turtle's home becomes where it is"):format(CONFIRM_WAIT))
+      return
+    end
+    armed = nil
+    enqueue({ kind = "sethome" })
+  end
+
   local function command(line)
     local name, rest = line:match("^/(%S+)%s*(.*)$")
     local id = tonumber(rest)
@@ -391,7 +413,7 @@ function M.run(opts)
       end
     elseif name == "resume" then
       if pending > 0 then feedback = "busy: wait for the current job or /stop it" else enqueue({ kind = "resume" }) end
-    elseif name == "refuel" or name == "update" then
+    elseif name == "refuel" or name == "sethome" or name == "update" then
       if rest ~= "" and not id then
         feedback = ("usage: /%s [id]"):format(name)
       elseif pending > 0 then
@@ -495,7 +517,8 @@ function M.run(opts)
         if a and a.type == "stop" then stopOne(a.id)
         elseif a and a.type == "stopAll" then stopAll()
         elseif a and a.type == "homeAll" then homeAll()
-        elseif a and a.type == "refuelAll" then refuelAll() end
+        elseif a and a.type == "refuelAll" then refuelAll()
+        elseif a and a.type == "setHomeAll" then setHomeAll() end
       end
     end
   end

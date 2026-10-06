@@ -284,19 +284,32 @@ M.onTurtleInWay = nil
 
 -- <Claude> Clears the block on side ("forward", "up", "down"). Air and liquids
 -- count as clear. Loops because gravel and sand fall back into the gap.
+-- detect, inspect and dig take a game tick each, so what is there can change
+-- in between: a turtle seen by detect may have moved off by the inspect (no
+-- block), or a block may be gone or replaced by the dig. Either way it looks
+-- again instead of failing: only a block still there after a failed dig is
+-- an error.
 function M.dig(side)
   for _ = 1, 32 do
     if not DETECT[side]() then return true end
-    local _, block = INSPECT[side]()
-    local name = type(block) == "table" and block.name or "unknown"
-    if name:find("computercraft:turtle", 1, true) then return false, TURTLE_IN_WAY end
-    if matches(name, config.protect) then return false, "protected block in the way: " .. name end
-    local ok, reason = DIG[side]()
-    if not ok then return false, ("cannot dig %s: %s"):format(name, tostring(reason)) end
-    M.dug = M.dug + 1
-    if matches(name, config.falling) then sleep(0.5) end
+    local found, block = INSPECT[side]()
+    local name = found and type(block) == "table" and block.name
+    if name then
+      if name:find("computercraft:turtle", 1, true) then return false, TURTLE_IN_WAY end
+      if matches(name, config.protect) then return false, "protected block in the way: " .. name end
+      local ok, reason = DIG[side]()
+      if ok then
+        M.dug = M.dug + 1
+        if matches(name, config.falling) then sleep(0.5) end
+      else
+        local still, now = INSPECT[side]()
+        if still and type(now) == "table" and now.name == name then
+          return false, ("cannot dig %s: %s"):format(name, tostring(reason))
+        end
+      end
+    end
   end
-  return false, "blocks keep falling in"
+  return false, "the way keeps filling up (falling blocks or passing turtles)"
 end
 
 -- <Claude> M.dig, but waits (up to config.turtleWaits tries) while a turtle is there.
@@ -428,6 +441,29 @@ function M.goTo(target, order)
     end
   end
   return true
+end
+
+-- <Claude> Whether err (from dig, clear, step or goTo) means another turtle
+-- kept the way blocked: worth waiting for and trying again (M.patiently).
+function M.turtleBlocked(err)
+  if type(err) ~= "string" then return false end
+  return err == TURTLE_IN_WAY or err:find("in the way for too long", 1, true) ~= nil
+    or err:find("after making way", 1, true) ~= nil
+end
+
+-- <Claude> Calls fn(retry), which returns ok, err like goTo. While it fails
+-- because a turtle blocked it, pauses a few seconds and calls it again
+-- (retry = true), up to config.turtleRetries more times: a busy turtle in
+-- the way is usually gone by then.
+function M.patiently(fn)
+  local ok, err = fn(false)
+  for _ = 1, config.turtleRetries do
+    if ok or not M.turtleBlocked(err) then return ok, err end
+    sleep(2 + 3 * math.random())
+    ok, err = fn(true)
+  end
+  if not ok and M.turtleBlocked(err) then err = ("%s (tried %d times)"):format(err, config.turtleRetries + 1) end
+  return ok, err
 end
 
 return M

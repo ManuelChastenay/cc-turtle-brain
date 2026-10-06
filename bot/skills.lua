@@ -2,7 +2,8 @@
   Skills the planner can put in a plan. Each is declared once:
     { name, doc, args = { { argName, type, default } }, run = function(args, ctx) -> result,
       split = function(args, positions) -> argsPerTurtle }   -- optional, fleet only
-  An arg with a default is optional; types are listed in bot/plan.lua.
+  An arg with a default is optional; types are listed in bot/plan.lua. An
+  arg marked hidden = true is left out of the prompt (set by split).
   run returns { ok = true, ... } or { ok = false, error = "..." }; extra
   scalar fields show up in the run summary. A worker can reboot in the
   middle of a step and run it again: ctx.state is what the step last passed
@@ -48,13 +49,39 @@ local function splitBox(a, positions)
   return parts
 end
 
+-- <Claude> Shares a mineCircle among the group: share k of n (n at most the
+-- diameter; bot/mine.lua turns it into a run of x columns), turtles sorted
+-- west to east getting the shares in that order. A step that is already a
+-- share goes to the first turtle as it is. Runs on the brain.
+local function splitCircle(a, positions)
+  local order = {}
+  for i = 1, #positions do order[i] = i end
+  table.sort(order, function(i, j)
+    local pi, pj = positions[i].x, positions[j].x
+    return pi < pj or (pi == pj and i < j)
+  end)
+  local parts = {}
+  if a.parts > 1 then
+    parts[order[1]] = a
+    return parts
+  end
+  for k = 1, math.min(#positions, a.diameter) do
+    local part = {}
+    for key, value in pairs(a) do part[key] = value end
+    part.part, part.parts = k, math.min(#positions, a.diameter)
+    parts[order[k]] = part
+  end
+  return parts
+end
+
 -- <Claude> Refuels from the inventory for the whole trip before moving.
 -- Junk from digging through obstacles on the way is dropped on arrival.
+-- A turtle that keeps the way blocked is waited for (nav.patiently).
 local function travel(target)
   local need = nav.distance(nav.pos(), target)
   if not nav.refuel(need) then return fail(("needs %d fuel, has %d"):format(need, nav.fuel())) end
   local dug = nav.dug
-  local ok, err = nav.goTo(target)
+  local ok, err = nav.patiently(function() return nav.goTo(target) end)
   if nav.dug > dug then inv.discardJunk() end
   if not ok then return fail(err) end
   return { ok = true }
@@ -80,6 +107,18 @@ M.list = {
     args = { { "x1", "int" }, { "y1", "int" }, { "z1", "int" }, { "x2", "int" }, { "y2", "int" }, { "z2", "int" } },
     run = function(a, ctx) return mine.mineBox(a, ctx) end,
     split = splitBox,
+  },
+  {
+    name = "mineCircle",
+    doc = "Dig out a round hole: a circle diameter blocks wide centered on block x,z (radius r ="
+      .. " diameter 2r+1; an even diameter reaches 1 further east and south), from level y1 to y2"
+      .. " (both included). Enters from above its edge and ends there.",
+    args = {
+      { "x", "int" }, { "z", "int" }, { "diameter", "count" }, { "y1", "int" }, { "y2", "int" },
+      { "part", "count", 1, hidden = true }, { "parts", "count", 1, hidden = true },
+    },
+    run = function(a, ctx) return mine.mineCircle(a, ctx) end,
+    split = splitCircle,
   },
   {
     name = "goTo",
@@ -142,7 +181,8 @@ M.list = {
     doc = "Make the current position and facing home.",
     run = function()
       nav.setHome()
-      return { ok = true }
+      local p = nav.pos()
+      return { ok = true, home = ("%d,%d,%d"):format(p.x, p.y, p.z) }
     end,
   },
   {

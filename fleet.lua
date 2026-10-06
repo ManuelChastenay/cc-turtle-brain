@@ -22,9 +22,10 @@ of turtles (by id) the steps they run. Turtles work on their own and in
 parallel; you only hear back, once all are done, if something failed: then
 you get each turtle's outcome and fresh state, and either send plans for the
 remaining work or reply with one line saying why it cannot be done.
-A turtle can be in one plan only. In a plan with several turtles, mineBox is
-split between them (each digs a slice) and every other step is done by each
-of them. Use world coordinates (mineBox, goTo) for shared work; mineArea and
+A turtle can be in one plan only. In a plan with several turtles, mineBox and
+mineCircle are split between them (each digs a share) and every other step is
+done by each of them. Use world coordinates (mineBox, mineCircle, goTo) for
+shared work; mineArea and
 move are relative to each turtle. Lua already handles paths, digging through
 obstacles, fuel and unloading. Read positions, fuel and inventories from the
 Turtles list. If the goal is only a question, or no skill can do it, reply in

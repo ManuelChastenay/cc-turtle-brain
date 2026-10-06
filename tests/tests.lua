@@ -232,6 +232,38 @@ test("junk is dropped instead of a trip home; ores, fuel and look-alikes are kep
   truthy((sim.ground["minecraft:cobblestone"] or 0) > 0, "cobblestone dropped")
 end)
 
+test("calcite, smooth basalt, smooth stone and every terracotta are junk; look-alikes are kept", function()
+  local junk = { "minecraft:calcite", "minecraft:smooth_basalt", "minecraft:smooth_stone", "minecraft:smooth_stone_slab",
+    "minecraft:terracotta", "minecraft:red_terracotta", "minecraft:light_gray_terracotta",
+    "minecraft:black_glazed_terracotta", "minecraft:light_blue_glazed_terracotta" }
+  local keep = { "minecraft:basalt", "minecraft:smooth_sandstone", "minecraft:stone_bricks" }
+  local all = {}
+  for _, n in ipairs(junk) do all[#all + 1] = n end
+  for _, n in ipairs(keep) do all[#all + 1] = n end
+  local function block(x, y, z) if y <= 30 then return all[(x * 7 + y * 13 + z * 3) % #all + 1] end end
+  sim.reset{ gps = false, terrain = block, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 5000 } }
+  saveState(0)
+  local nav, mine = require("bot.nav"), require("bot.mine")
+  nav.init()
+  local r = mine.mineArea({ direction = "north", length = 5, width = 5, layers = 3, vertical = "down", side = "right" })
+  truthy(r.ok, tostring(r.error))
+  local dug = {}
+  for k in pairs(boxCells({ x = 0, y = 31, z = 0 }, 0, 5, 5, 3, "down", "right")) do
+    local x, y, z = k:match("(-?%d+),(-?%d+),(-?%d+)")
+    dug[block(tonumber(x), tonumber(y), tonumber(z))] = true
+  end
+  local held = {}
+  for _, it in pairs(sim.t.inv) do held[it.name] = true end
+  for _, n in ipairs(junk) do
+    truthy(dug[n], n .. " is in the test box")
+    truthy(sim.ground[n] and not held[n], n .. " dropped")
+  end
+  for _, n in ipairs(keep) do
+    truthy(dug[n], n .. " is in the test box")
+    truthy(held[n] and not sim.ground[n], n .. " kept")
+  end
+end)
+
 test("junk never goes into a chest next to the turtle", function()
   sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 500,
     inv = { { "minecraft:cobblestone", 64 }, { "minecraft:raw_iron", 3 } } } }
@@ -658,6 +690,142 @@ test("mineBox split: slices cover the box once, sorted turtles get sorted slices
   truthy(few[1] and few[2], "two slices") eq(few[3], nil, "third turtle gets none")
 end)
 
+---------------------------------------------------------------- circles
+local function at(k)
+  local x, y, z = k:match("(-?%d+),(-?%d+),(-?%d+)")
+  return tonumber(x), tonumber(y), tonumber(z)
+end
+
+-- <Claude> Keys of a cylinder: the circle (mine.circle, checked against the
+-- definition below) centered on x,z, from level y1 to y2.
+local function cylinder(mine, x, z, d, y1, y2)
+  local lo, cells = math.floor((d - 1) / 2), {}
+  for i, c in ipairs(mine.circle(d)) do
+    for j = c[1], c[2] do
+      for y = math.min(y1, y2), math.max(y1, y2) do cells[sim.key(x - lo + i - 1, y, z - lo + j)] = true end
+    end
+  end
+  return cells
+end
+
+test("circle: 75 wide is the circle of the chart (one-block bumps); small and even sizes", function()
+  sim.reset{}
+  local mine = require("bot.mine")
+  local cols = mine.circle(75)
+  eq(#cols, 75)
+  eq(cols[1][1], 37) eq(cols[1][2], 37, "west bump")
+  eq(cols[2][1], 29) eq(cols[2][2], 45, "column 1")
+  eq(cols[38][1], 0) eq(cols[38][2], 74, "middle column")
+  for i = 1, 75 do
+    for j = 0, 74 do
+      local dx, dz = i - 1 - 37, j - 37
+      eq(j >= cols[i][1] and j <= cols[i][2], dx * dx + dz * dz <= 37 * 37, ("block %d,%d"):format(i - 1, j))
+    end
+  end
+  local function shape(d)
+    local out = {}
+    for i, c in ipairs(mine.circle(d)) do out[i] = c[1] .. "-" .. c[2] end
+    return table.concat(out, " ")
+  end
+  eq(shape(1), "0-0") eq(shape(2), "0-1 0-1") eq(shape(3), "1-1 0-2 1-1")
+  eq(shape(4), "1-2 0-3 0-3 1-2", "even: two-block bumps") eq(shape(5), "2-2 1-3 0-4 1-3 2-2")
+end)
+
+test("circle shares: each column in exactly one share, shares hold about as many blocks", function()
+  sim.reset{}
+  local mine = require("bot.mine")
+  local cols = mine.circle(75)
+  for parts = 1, 40 do
+    local nextCol, sizes = 0, {}
+    for part = 1, parts do
+      local from, to = mine.share(cols, part, parts)
+      eq(from, nextCol, ("%d parts: share %d starts where the last ended"):format(parts, part))
+      truthy(to >= from, "not empty")
+      local n = 0
+      for i = from, to do n = n + cols[i + 1][2] - cols[i + 1][1] + 1 end
+      sizes[#sizes + 1] = n
+      nextCol = to + 1
+    end
+    eq(nextCol, 75, parts .. " parts: every column")
+    if parts <= 8 then
+      local lo, hi = math.min(table.unpack(sizes)), math.max(table.unpack(sizes))
+      truthy(hi <= lo * 1.3, ("%d parts: %d to %d blocks"):format(parts, lo, hi))
+    end
+  end
+  eq(mine.share(mine.circle(3), 4, 5), nil, "more parts than columns: nothing")
+  local from, to = mine.share(mine.circle(3), 3, 5)
+  eq(from, 2) eq(to, 2)
+end)
+
+test("mineCircle: digs exactly the cylinder from any side, ends just above it", function()
+  local starts = { { -20, 0 }, { 20, 3 }, { 2, -20 }, { 0, 25 }, { 3, 3 } }
+  for _, c in ipairs({ { 2, 3, 7, 30, 27 }, { 2, 3, 1, 30, 30 }, { -4, 5, 9, 28, 30 }, { 1, -2, 8, 30, 26 } }) do
+    for _, st in ipairs(starts) do
+      sim.reset{ gps = false, turtle = { x = st[1], y = 31, z = st[2], h = 2, fuel = 5000 } }
+      saveState(2)
+      local nav, mine = require("bot.nav"), require("bot.mine")
+      nav.init()
+      local r = mine.mineCircle({ x = c[1], z = c[2], diameter = c[3], y1 = c[4], y2 = c[5], part = 1, parts = 1 })
+      local tag = ("center %d,%d d=%d y %d..%d from %d,%d"):format(c[1], c[2], c[3], c[4], c[5], st[1], st[2])
+      truthy(r.ok, tag .. ": " .. tostring(r.error))
+      local cells = cylinder(mine, c[1], c[2], c[3], c[4], c[5])
+      for k in pairs(cells) do eq(sim.get(at(k)), nil, tag .. ": undug " .. k) end
+      for _, k in ipairs(sim.dugLog) do truthy(cells[k], tag .. ": collateral dig at " .. k) end
+      eq(#sim.dugLog, count(cells), tag .. ": dug count")
+      eq(sim.t.y, math.max(c[4], c[5]) + 1, tag .. ": end level")
+    end
+  end
+end)
+
+test("mineCircle shares: three shares dig the cylinder once, each in its own columns", function()
+  sim.reset{ gps = false, turtle = { x = -10, y = 31, z = 0, h = 1, fuel = 5000 } }
+  saveState(1)
+  local nav, mine = require("bot.nav"), require("bot.mine")
+  nav.init()
+  local cells = cylinder(mine, 0, 0, 9, 30, 26)
+  for part = 1, 3 do
+    local before = #sim.dugLog
+    local r = mine.mineCircle({ x = 0, z = 0, diameter = 9, y1 = 30, y2 = 26, part = part, parts = 3 })
+    truthy(r.ok, part .. ": " .. tostring(r.error))
+    local from, to = mine.share(mine.circle(9), part, 3)
+    for i = before + 1, #sim.dugLog do
+      local k = sim.dugLog[i]
+      local x = at(k)
+      truthy(cells[k], "collateral dig at " .. k)
+      truthy(x + 4 >= from and x + 4 <= to, ("share %d dug in column %d"):format(part, x))
+    end
+  end
+  for k in pairs(cells) do eq(sim.get(at(k)), nil, "undug " .. k) end
+  eq(#sim.dugLog, count(cells), "dug count")
+end)
+
+test("mineCircle split: shares go to the turtles west to east; part and parts stay out of the prompt", function()
+  sim.reset{}
+  local skills, plan = require("bot.skills"), require("bot.plan")
+  local split
+  for _, sk in ipairs(skills.list) do if sk.name == "mineCircle" then split = sk.split end end
+  local function turtles(...)
+    local list = {}
+    for i, x in ipairs({ ... }) do list[i] = { x = x, y = 64, z = 0 } end
+    return list
+  end
+  local parts = split({ x = 0, z = 0, diameter = 75, y1 = 60, y2 = 40, part = 1, parts = 1 }, turtles(100, -50, 7))
+  eq(parts[2].part, 1) eq(parts[3].part, 2) eq(parts[1].part, 3)
+  for i = 1, 3 do eq(parts[i].parts, 3) eq(parts[i].diameter, 75) eq(parts[i].y2, 40) end
+  local few = split({ x = 0, z = 0, diameter = 2, y1 = 30, y2 = 30, part = 1, parts = 1 }, turtles(0, 1, 2))
+  truthy(few[1] and few[2], "two shares") eq(few[3], nil, "third turtle gets none")
+  local share = split({ x = 0, z = 0, diameter = 9, y1 = 30, y2 = 30, part = 2, parts = 4 }, turtles(5, 1))
+  eq(share[2].part, 2) eq(share[1], nil, "a step that is already a share goes to one turtle")
+  local cat = plan.catalog(skills.list)
+  truthy(cat:find("- mineCircle(x, z, diameter, y1, y2):", 1, true), cat)
+  local schema = plan.stepSchema(skills.list)
+  eq(schema.properties.part, nil) eq(schema.properties.parts, nil)
+  local steps = assert(plan.check({ { skill = "mineCircle", x = 1, z = 2, diameter = 5, y1 = 3, y2 = 1 } }, skills.list))
+  eq(steps[1].args.part, 1) eq(steps[1].args.parts, 1)
+  truthy(plan.check({ { skill = "mineCircle", x = 1, z = 2, diameter = 5, y1 = 3, y2 = 1, part = 2, parts = 3 } }, skills.list),
+    "a share checks on the turtle")
+end)
+
 test("another turtle in the way: wait for it, never dig it, give up after a while", function()
   sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 100 } }
   sim.set(0, 31, -2, "computercraft:turtle_normal")
@@ -673,6 +841,29 @@ test("another turtle in the way: wait for it, never dig it, give up after a whil
   eq(ok, false) eq(err, "turtle in the way for too long")
   eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, -4, "back on its path")
   eq(#sim.dugLog, 0, "dug")
+end)
+
+test("a turtle that moves off between detect and inspect: carry on, not 'cannot dig unknown'", function()
+  -- in CC every turtle command takes a tick, so the turtle detect saw can be gone by the inspect
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 500 } }
+  saveState(0)
+  local B = sim.spawn(2, { x = 0, y = 31, z = -1 })
+  local function leaveWhenSeen(spot)
+    B.x, B.y, B.z = 0, spot[2], spot[3]
+    sim.set(0, spot[2], spot[3], nil) -- it came through there: air once it leaves
+    sim.onDetect = function(_, x, y, z) if sim.turtleAt(x, y, z) == B then B.x, B.y, B.z = 5, 31, 5 end end
+  end
+  local nav, mine = require("bot.nav"), require("bot.mine")
+  nav.init()
+  leaveWhenSeen({ 0, 31, -1 }) -- right in front
+  local ok, err = nav.goTo({ x = 0, y = 31, z = -3 })
+  truthy(ok, tostring(err))
+  eq(sim.t.z, -3) eq(#sim.dugLog, 0, "dug")
+  leaveWhenSeen({ 0, 30, -5 }) -- in the top layer of a box, dug from below
+  local r = mine.mineArea({ direction = "north", length = 3, width = 1, layers = 3, vertical = "down", side = "right" })
+  truthy(r.ok, tostring(r.error))
+  for z = -6, -4 do for y = 28, 30 do eq(sim.get(0, y, z), nil, "box cell") end end
+  eq(B.x, 5, "B left")
 end)
 
 test("worker: status, plan with progress, busy, rejected plan, stop", function()
@@ -801,6 +992,52 @@ test("mineArea waits for a turtle passing through a cell it digs above itself", 
   for z = -3, -1 do for y = 28, 30 do eq(sim.get(0, y, z), nil, "box cell") end end
 end)
 
+-- <Claude> Turtle #2 sits on the walking route of a 3x1x3 pit north of 0,31,0
+-- (it never gives way: #1 has the lower id) until `leaves` seconds of virtual time.
+local function blockedPit(leaves)
+  sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 500 } }
+  saveState(0)
+  sim.set(0, 29, -2, nil) -- it came through there: air once it leaves
+  local B = sim.spawn(2, { x = 0, y = 29, z = -2 })
+  sim.onSleep = function() if sim.now >= leaves and B.z == -2 then B.x, B.y, B.z = 5, 31, 5 end end
+  local nav, mine = require("bot.nav"), require("bot.mine")
+  nav.init()
+  local r = mine.mineArea({ direction = "north", length = 3, width = 1, layers = 3, vertical = "down", side = "right" })
+  sim.onSleep = nil
+  for _, k in ipairs(sim.dugLog) do
+    local x, y, z = k:match("(-?%d+),(-?%d+),(-?%d+)")
+    truthy(tonumber(x) == 0 and tonumber(y) >= 28 and tonumber(y) <= 30 and tonumber(z) >= -3 and tonumber(z) <= -1,
+      "dug outside the box: " .. k)
+  end
+  eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0, "back at the start")
+  return r, B
+end
+
+test("mining waits for a turtle that blocks it longer than one step's patience, then finishes", function()
+  local r = blockedPit(90) -- one step gives up after ~20-30 s
+  truthy(r.ok, tostring(r.error))
+  for z = -3, -1 do for y = 28, 30 do eq(sim.get(0, y, z), nil, "box cell") end end
+  truthy(sim.now >= 90, "it waited")
+end)
+
+test("mining gives up on a turtle that never moves, after its retries", function()
+  local r, B = blockedPit(math.huge)
+  eq(r.ok, false)
+  truthy(r.error:find("turtle #2 in the way for too long (tried 11 times)", 1, true), r.error)
+  eq(B.z, -2, "never dug")
+end)
+
+test("travel skills wait for a turtle in the way too", function()
+  local navA, _, B = twoTurtles({ 0, 31, 0, 1, id = 1 }, { 4, 31, 0, 0 })
+  sim.onSleep = function() if sim.now >= 60 and B.x == 4 then B.z = 5 end end
+  local goTo
+  for _, s in ipairs(require("bot.skills").list) do if s.name == "goTo" then goTo = s end end
+  local r = goTo.run({ x = 8, y = 31, z = 0 }, {})
+  sim.onSleep = nil
+  truthy(r.ok, tostring(r.error))
+  eq(navA.pos().x, 8) eq(#sim.dugLog, 0, "dug")
+end)
+
 test("two turtles crossing to their slices and back home both finish their mineBox", function()
   -- A starts at x=7 but digs the x=0..3 slice; B starts at x=0 and digs x=4..7: their paths cross
   local navA, navB, B = twoTurtles({ 7, 31, 0, 0 }, { 0, 31, 0, 0 })
@@ -819,6 +1056,17 @@ test("two turtles crossing to their slices and back home both finish their mineB
   truthy(ra[1].ok, "A: " .. tostring(ra[1].error)) truthy(rb[1].ok, "B: " .. tostring(rb[1].error))
   eq(sim.t.x, 7) eq(sim.t.z, 0) eq(B.x, 0) eq(B.z, 0)
   for x = 0, 7 do for y = 28, 30 do for z = 3, 6 do eq(sim.get(x, y, z), nil, "box cell") end end end
+end)
+
+test("two turtles dig their shares of a circle side by side", function()
+  local _, _, B = twoTurtles({ 10, 31, 0, 0 }, { -10, 31, 0, 0 })
+  local mineA, mineB = require("bot.mine"), B.require("bot.mine")
+  local function share(part) return { x = 0, z = 0, diameter = 11, y1 = 30, y2 = 27, part = part, parts = 2 } end
+  local ra, rb = both(function() return mineA.mineCircle(share(2)) end, function() return mineB.mineCircle(share(1)) end)
+  truthy(ra[1].ok, "A: " .. tostring(ra[1].error)) truthy(rb[1].ok, "B: " .. tostring(rb[1].error))
+  local cells = cylinder(mineA, 0, 0, 11, 30, 27)
+  for k in pairs(cells) do eq(sim.get(at(k)), nil, "undug " .. k) end
+  for _, k in ipairs(sim.dugLog) do truthy(cells[k], "collateral dig at " .. k) end
 end)
 
 test("worker: moves aside on makeway when idle, ignores it when busy", function()
@@ -1060,6 +1308,28 @@ test("worker: a job survives reboots at any point and digs exactly the box", fun
   -- "left" was north once the dig ended facing east: 2 blocks north of the start, not more
   eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, -2)
   eq(sim.files["/job.json"], nil, "job file")
+end)
+
+test("worker: a circle job survives reboots at any point and digs exactly the cylinder", function()
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 1, fuel = 5000 }, modem = true, id = 5 }
+  local sent = false
+  sim.onIdle = function()
+    if sent then return false end
+    sent = true
+    sim.deliver(99, { type = "plan", job = "c1", steps = {
+      { skill = "mineCircle", x = 3, z = -8, diameter = 8, y1 = 30, y2 = 24 },
+      { skill = "goTo", x = 0, y = 31, z = 0 } } })
+    return true
+  end
+  local reboots, err = runWorkerWithReboots(function(n) return n < 40 and 5 + (n * 7) % 13 or nil end)
+  eq(err, "SIM_IDLE")
+  truthy(reboots >= 5, "reboots " .. reboots)
+  local result = lastResult()
+  eq(result.job, "c1") eq(result.ok, true, tostring(result.error))
+  local cells = cylinder(require("bot.mine"), 3, -8, 8, 30, 24)
+  for k in pairs(cells) do eq(sim.get(at(k)), nil, "undug " .. k) end
+  for _, k in ipairs(sim.dugLog) do truthy(cells[k], "collateral dig at " .. k) end
+  eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0)
 end)
 
 test("mineArea resumed from one block beside its box steps back in, no digging outside", function()

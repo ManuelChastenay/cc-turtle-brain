@@ -6,17 +6,28 @@
              lowFuel,                                  -- fuel below this shows red
              turtles = { { id, label, state = "idle"|"busy"|"lost", pos = {x,y,z},
                            fuel, step, steps, text, silent } ... },  -- sorted by id
-             log = { "line", ... } }                   -- oldest first
+             log = { "line", ... },                    -- oldest first
+             confirm }                                 -- "setHomeAll": its button asks for a second tap
     layout = M.layout(view, w, h) -> { rows, buttons }
       rows: exactly h rows of chunks { text, fg, bg }, each row exactly w wide
       buttons: { { y, x1, x2, action } } with action { type = "stop", id } |
-               { type = "stopAll" } | { type = "homeAll" } | { type = "refuelAll" }
+               { type = "stopAll" } | { type = "homeAll" } | { type = "refuelAll" } |
+               { type = "setHomeAll" }
     M.draw(term, view) draws it and returns the layout; M.hit(layout, x, y)
     answers a monitor_touch with the action under that cell (or nil).
 ]]
 local M = {}
 
 local STATE_COLOR = { busy = "yellow", idle = "lime", lost = "red" }
+
+-- <Claude> The button bar: action, color, label, short label (used when the
+-- full bar does not fit), and the labels asking for a second tap.
+local BAR = {
+  { "stopAll", "red", "[STOP ALL]", "[STOP ALL]" },
+  { "homeAll", "blue", "[HOME ALL]", "[HOME]" },
+  { "refuelAll", "green", "[REFUEL ALL]", "[FUEL]" },
+  { "setHomeAll", "purple", "[SET HOME]", "[SETHOME]", confirm = { "[CONFIRM?]", "[CONFIRM]" } },
+}
 
 -- <Claude> Left-aligned text cut or padded to exactly n characters. Cuts end in ".."
 -- (the CC font has no ellipsis).
@@ -166,14 +177,21 @@ function M.layout(view, w, h)
   end
   while #rows < h - 1 do rows[#rows + 1] = fill({}, w) end
 
+  -- <Claude> Full labels if they all fit, else short ones; a button that still
+  -- does not fit is left out (never half drawn with a touch area off screen).
   local y = #rows + 1
+  local full = #BAR - 1
+  for _, b in ipairs(BAR) do full = full + #b[3] end
+  local short = full > w
   local bar, x = {}, 1
-  for _, b in ipairs({ { "[STOP ALL]", "red", "stopAll" }, { "[HOME ALL]", "blue", "homeAll" },
-                       { "[REFUEL ALL]", "green", "refuelAll" } }) do
+  for _, b in ipairs(BAR) do
+    local asking = b.confirm and view.confirm == b[1]
+    local label = asking and b.confirm[short and 2 or 1] or b[short and 4 or 3]
+    if x + #label - 1 > w then break end
     if x > 1 then bar[#bar + 1] = chunk(" ") end
-    bar[#bar + 1] = chunk(b[1], "white", b[2])
-    buttons[#buttons + 1] = { y = y, x1 = x, x2 = x + #b[1] - 1, action = { type = b[3] } }
-    x = x + #b[1] + 1
+    bar[#bar + 1] = chunk(label, "white", asking and "orange" or b[2])
+    buttons[#buttons + 1] = { y = y, x1 = x, x2 = x + #label - 1, action = { type = b[1] } }
+    x = x + #label + 1
   end
   rows[#rows + 1] = fill(bar, w)
 
