@@ -1,7 +1,9 @@
 --[[ <Claude>
   A speaker turtle that follows a player around and plays music.
-    Pocket computer (wireless): `follow` = the beacon. The player carries it;
-      it broadcasts its GPS position twice a second.
+    Pocket computer (wireless): `follow [turtle id ...]` = the beacon. The
+      player carries it; it sends its GPS position twice a second to those
+      turtles, or to every follow turtle without ids. A turtle that stops
+      hearing it stays where it last saw it.
     Turtle (speaker + wireless/ender modem): `follow [song ...]` follows the
       first beacon it hears, hovering HEIGHT blocks above it, and plays the
       songs in a loop at full volume. Songs are DFPWM files or URLs (convert
@@ -16,10 +18,17 @@ local net = require("bot.net")
 if not net.open() then error("follow needs a wireless or ender modem", 0) end
 
 if pocket then
-  print("Beacon on: the turtle follows you. Ctrl+T stops it.")
+  local ids = {}
+  for i, a in ipairs({ ... }) do ids[i] = tonumber(a) or error("usage: follow [turtle id ...]", 0) end
+  print(#ids > 0 and ("Beacon on for #%s. Ctrl+T stops it."):format(table.concat(ids, ", #"))
+    or "Beacon on for every follow turtle. Ctrl+T stops it.")
   while true do
     local x, y, z = gps.locate(2)
-    if x then rednet.broadcast({ x = math.floor(x), y = math.floor(y), z = math.floor(z) }, PROTOCOL) end
+    if x then
+      local p = { x = math.floor(x), y = math.floor(y), z = math.floor(z) }
+      if #ids == 0 then rednet.broadcast(p, PROTOCOL) end
+      for _, id in ipairs(ids) do rednet.send(id, p, PROTOCOL) end
+    end
     sleep(0.5)
   end
 end

@@ -1147,6 +1147,18 @@ test("follow: flies over a wall to the first beacon it hears, never digs", funct
   eq(#sim.dugLog, 0, "blocks dug")
 end)
 
+test("follow: a pocket beacon with ids sends only to those turtles", function()
+  sim.reset{ modem = true }
+  _G.pocket = {}
+  sim.onSleep = function() error("SLEPT", 0) end
+  local _, _, err = quietly(assert(loadfile(REPO .. "follow.lua")), "12", "15")
+  _G.pocket = nil
+  eq(err, "SLEPT")
+  eq(#sim.sent, 2, "messages")
+  eq(sim.sent[1].to, 12) eq(sim.sent[2].to, 15)
+  eq(sim.sent[1].proto, "follow") eq(sim.sent[1].msg.x, sim.t.x)
+end)
+
 test("worker: moves aside on makeway when idle, ignores it when busy", function()
   sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
   local nav = require("bot.nav") -- the same module worker.lua will get
