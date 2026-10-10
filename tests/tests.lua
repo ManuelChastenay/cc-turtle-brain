@@ -1129,6 +1129,24 @@ test("two turtles dig their shares of a circle side by side", function()
   for _, k in ipairs(sim.dugLog) do truthy(cells[k], "collateral dig at " .. k) end
 end)
 
+test("follow: flies over a wall to the first beacon it hears, never digs", function()
+  local wall = {}
+  for y = 31, 33 do for z = -3, 3 do wall[#wall + 1] = { 3, y, z, "minecraft:oak_planks" } end end
+  sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 1, fuel = 500 }, modem = true, blocks = wall }
+  local heard = false
+  sim.onSleep = function()
+    if not heard then -- waiting for a beacon: two beacons speak, #7 first
+      heard = true
+      sim.deliver(7, { x = 10, y = 31, z = 1 }, "follow")
+      sim.deliver(8, { x = -20, y = 31, z = 0 }, "follow")
+    end
+    if math.abs(sim.t.x - 10) + math.abs(sim.t.y - 33) + math.abs(sim.t.z - 1) <= 3 then error("ARRIVED", 0) end
+  end
+  local _, _, err = quietly(assert(loadfile(REPO .. "follow.lua")))
+  eq(err, "ARRIVED")
+  eq(#sim.dugLog, 0, "blocks dug")
+end)
+
 test("worker: moves aside on makeway when idle, ignores it when busy", function()
   sim.reset{ turtle = { x = 0, y = 31, z = 0, h = 0, fuel = 2000 }, modem = true, id = 5 }
   local nav = require("bot.nav") -- the same module worker.lua will get

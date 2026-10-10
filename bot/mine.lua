@@ -2,14 +2,15 @@
   mineArea: digs out a box next to the turtle and comes back to the start.
   mineBox: same digging for a box given by world coordinates (fleet jobs).
   mineCircle, mineSphere: a cylinder or a ball (bot/shape.lua), possibly cut
-  to a range of levels, shared among turtles by runs of x columns.
+  to a range of levels, shared among turtles by runs of x columns, dug from
+  its wider end level (bottom-up for a dome).
   Local frame: a = blocks ahead (toward direction), r = blocks to the right,
   l = layers above the start level. Layers are taken three at a time: the
   turtle walks the middle one and digs up and down, so a 3-deep area costs
   one pass of fuel. In a ball, a layer of the group can be wider than the
   middle one: its extra ring is walked on that layer. Every move stays inside
   the shape, except the first step in "down" mode (the block above the door,
-  in front of the turtle).
+  in front of the turtle; below it for a round shape dug bottom-up).
   Junk (bot/config.lua) is dropped into the hole after every cell. When the
   inventory fills anyway, it burns what burns; if that is not enough, it
   unloads into a chest next to the start or at home, then resumes.
@@ -82,7 +83,8 @@ local function layout(args)
 end
 
 -- <Claude> A round shape's share in the local frame of heading h with the
--- start at origin (above the door). args: shape (world, bot/shape.lua) and
+-- start at origin (above the door, below it when upward). args: shape (world,
+-- bot/shape.lua), upward (levels bottom-up instead of top-down) and
 -- from, to: the share's x columns, the first one nearest the door. Rows run
 -- along z (a) and the frame's r runs along x. inside(c) is the whole shape,
 -- not only the share: the turtle may cross other shares to reach its own.
@@ -105,8 +107,9 @@ local function roundLayout(args, h, origin)
     list[#list + 1] = cell
     if #list % BIG == 0 then sleep(0) end
   end
-  local layers = {}
-  for y = shape.highest(s), shape.lowest(s), -1 do layers[#layers + 1] = y - origin.y end
+  local layers, y1, y2, dy = {}, shape.highest(s), shape.lowest(s), -1
+  if args.upward then y1, y2, dy = y2, y1, 1 end
+  for y = y1, y2, dy do layers[#layers + 1] = y - origin.y end
   for g = 1, #layers, 3 do
     local n, group = math.min(3, #layers - g + 1), {}
     for i = g, g + n - 1 do group[layers[i]] = true end
@@ -156,7 +159,7 @@ local function roundLayout(args, h, origin)
       end
     end
   end
-  local door = { a = 1, r = 0, l = -1 }
+  local door = { a = 1, r = 0, l = args.upward and 1 or -1 }
   if #list == 0 then return list, door, 0, inside end
   return list, door, moves(list, door), inside
 end
@@ -224,7 +227,7 @@ local function dig(h, args, ctx)
       end
       if not nextAxis then
         if axis then go(p, axis) end
-        return go(c, order) -- only from outside the shape (the approach above the door)
+        return go(c, order) -- only from outside the shape (the approach next to the door)
       end
       if axis and nextAxis ~= axis then go(p, axis) end
       axis = nextAxis
@@ -336,6 +339,10 @@ local function dig(h, args, ctx)
         end
         if v.up then check(nav.clear("up")) end
         if v.down then check(nav.clear("down")) end
+        -- <Claude> Bottom-up, the level above is not dug yet: sand or gravel there
+        -- falls into the block just dug up, onto the turtle. ponytail: one more
+        -- look; a block still falling by then ends on the floor of the hole.
+        if v.up and args.upward then check(nav.clear("up")) end
       end, rejoin)
       -- <Claude> The cell's junk goes into a block just dug, so it stays in the hole.
       local open = {}
@@ -401,25 +408,30 @@ function M.mineBox(a, ctx)
 end
 
 -- <Claude> Share part of parts of a round shape s (bot/shape.lua): a run of
--- x columns with about as many blocks as the others. Rows run along z. The
--- turtle enters from above the door: the top level's block on the middle row
--- nearest its share (a ball cut below its middle has its widest level on
--- top, so that is in the share; a whole ball's top is its pole, which every
--- share goes through). It digs top-down and ends at that entry point.
+-- x columns with about as many blocks as the others. Rows run along z. It
+-- digs from its wider end level: top-down, or bottom-up when the bottom is
+-- wider (a ball cut above its middle, a dome), so the turtles start spread
+-- over that level instead of queuing at the pole. The turtle enters the end
+-- level from just above (or below) it, at its block on the middle row nearest
+-- the share (a whole ball's pole is that block for every share), and ends at
+-- that entry point.
 local function mineRound(s, part, parts, ctx)
   if part > parts then return { ok = false, error = "part must be at most parts" } end
   local from, to = shape.share(shape.counts(s, "solid", "x"), part, parts)
   if not from then return { ok = true, mined = 0 } end -- more parts than columns: nothing left for this one
   local x1, x2 = s.x1 + from, s.x1 + to
-  local top = shape.highest(s)
+  local top, bottom = shape.highest(s), shape.lowest(s)
   local zmid = math.floor(s.cz / 2) -- the middle row: in every column of every level
   local p = nav.pos()
   local near = math.abs(p.x - x1) <= math.abs(p.x - x2) and x1 or x2
   local xa, xb = shape.line(s, top, nil, zmid)
+  local ba, bb = shape.line(s, bottom, nil, zmid)
+  local upward = bb - ba > xb - xa
+  if upward then xa, xb = ba, bb end
   local h = p.z <= zmid and 2 or 0 -- rows run away from the turtle: south if it is north of the middle row
   local _, fz = nav.vector(h)
-  local entry = { x = math.max(xa, math.min(xb, near)), y = top + 1, z = zmid - fz }
-  local args = { shape = s, from = near, to = near == x1 and x2 or x1 }
+  local entry = { x = math.max(xa, math.min(xb, near)), y = upward and bottom - 1 or top + 1, z = zmid - fz }
+  local args = { shape = s, from = near, to = near == x1 and x2 or x1, upward = upward }
   local need = nav.distance(p, entry) + config.fuelMargin
   if config.fuelForWholeDig then need = need + select(3, roundLayout(args, h, entry)) end
   if not nav.refuel(need) then return fuelError(need) end

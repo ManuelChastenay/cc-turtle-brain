@@ -158,7 +158,8 @@ M.list = {
   {
     name = "mineSphere",
     doc = "Dig out a ball diameter blocks wide centered on block x,y,z (radius r = diameter 2r+1), only"
-      .. " the levels from top down to bottom when given. Enters from above and ends there.",
+      .. " the levels from top down to bottom when given. Digs from its wider end level (bottom-up for a"
+      .. " dome), entering from just outside it, and ends there.",
     args = {
       { "x", "int" }, { "y", "int" }, { "z", "int" }, { "diameter", "count" },
       { "top", "int", optional = true }, { "bottom", "int", optional = true },
@@ -172,11 +173,13 @@ M.list = {
     doc = "Build a ball of one block (block = its id, e.g. minecraft:stone_bricks) centered as for"
       .. " mineSphere: fill=hollow (a shell) or solid; top/bottom keep only those levels (an open dome"
       .. " or bowl). Blocks come from supply: home (a chest next to each turtle's home) or \"x,y,z\" of"
-      .. " a chest, taken from above it; it must hold only that block (and fuel). Ends above the ball.",
+      .. " a chest, taken from above it; it must hold only that block (and fuel). touching=yes: place only"
+      .. " blocks with a side (not the top) on something other than air or block, e.g. to line a dug"
+      .. " bowl but not its rim in open air (slower). Ends above the ball.",
     args = {
       { "x", "int" }, { "y", "int" }, { "z", "int" }, { "diameter", "count" }, { "block", "str" },
       { "fill", "hollow|solid|walls", "hollow" }, { "top", "int", optional = true },
-      { "bottom", "int", optional = true }, { "supply", "str", "home" },
+      { "bottom", "int", optional = true }, { "supply", "str", "home" }, { "touching", "no|yes", "no" },
       { "part", "count", 1, hidden = true }, { "parts", "count", 1, hidden = true },
     },
     run = function(a, ctx) return build.sphere(a, ctx) end,

@@ -168,6 +168,49 @@ return function(test, eq, truthy, h)
     eq(#sim.dugLog, total, "dug count")
   end)
 
+  test("mineSphere: a dome (cut above its middle) is dug bottom-up from under its floor; shares enter apart", function()
+    local shape = require("bot.shape")
+    local a = { x = 0, y = 28, z = 0, diameter = 21, bottom = 31 }
+    local s = shape.cut(shape.ball(0, 28, 0, 21), nil, 31)
+    local cells = h.blocks(s)
+    local function hill(x, y, z) if y <= 30 or shape.inside(s, x, y, z) then return "minecraft:stone" end end
+    local function checkDigs(tag, oneShare)
+      for k in pairs(cells) do eq(sim.get(h.at(k)), nil, tag .. ": undug " .. k) end
+      local under, last31, first38 = 0, 0, nil
+      for i, k in ipairs(sim.dugLog) do
+        local _, y = h.at(k)
+        if not cells[k] then eq(y, 30, tag .. ": collateral dig at " .. k) under = under + 1 end
+        if cells[k] and y == 31 then last31 = i end
+        if y == 38 and not first38 then first38 = i end
+      end
+      if oneShare then truthy(first38 and last31 < first38, tag .. ": the floor level was not done before the top") end
+      return under
+    end
+    for _, st in ipairs({ { -25, 0 }, { 25, 3 }, { 2, -25 }, { 0, 25 } }) do
+      sim.reset{ gps = false, terrain = hill, turtle = { x = st[1], y = 31, z = st[2], h = 2, fuel = 50000 } }
+      h.saveState(2)
+      require("bot.nav").init()
+      a.part, a.parts = 1, 1
+      local r = require("bot.mine").mineSphere(a)
+      local tag = ("dome from %d,%d"):format(st[1], st[2])
+      truthy(r.ok, tag .. ": " .. tostring(r.error))
+      eq(checkDigs(tag, true), 2, tag .. ": blocks dug under the floor (start, approach)")
+      eq(sim.t.y, 30, tag .. ": ends under the floor")
+    end
+    sim.reset{ gps = false, terrain = hill, turtle = { x = -25, y = 31, z = 0, h = 1, fuel = 50000 } }
+    h.saveState(1)
+    require("bot.nav").init()
+    local entries = {}
+    for part = 1, 3 do
+      a.part, a.parts = part, 3
+      local r = require("bot.mine").mineSphere(a)
+      truthy(r.ok, part .. ": " .. tostring(r.error))
+      entries[sim.t.x] = true
+    end
+    checkDigs("3 shares")
+    eq(h.count(entries), 3, "each share enters at its own column")
+  end)
+
   test("mineSphere: split west to east; top and bottom are optional (top=none in the prompt)", function()
     sim.reset{}
     local plan, skills = require("bot.plan"), require("bot.skills")
@@ -204,12 +247,41 @@ return function(test, eq, truthy, h)
     eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0)
   end)
 
+  test("worker: a dome job (bottom-up) survives reboots at any point and digs exactly the dome", function()
+    local shape = require("bot.shape")
+    local s = shape.cut(shape.ball(3, 28, -20, 17), nil, 31)
+    local function hill(x, y, z) if y <= 30 or shape.inside(s, x, y, z) then return "minecraft:stone" end end
+    sim.reset{ terrain = hill, turtle = { x = 0, y = 31, z = 0, h = 1, fuel = 20000 }, modem = true, id = 5 }
+    local sent = false
+    sim.onIdle = function()
+      if sent then return false end
+      sent = true
+      sim.deliver(99, { type = "plan", job = "d1", steps = {
+        { skill = "mineSphere", x = 3, y = 28, z = -20, diameter = 17, bottom = 31 },
+        { skill = "goTo", x = 0, y = 31, z = 0 } } })
+      return true
+    end
+    local reboots, err = h.runWorkerWithReboots(function(n) return n < 40 and 5 + (n * 7) % 13 or nil end)
+    eq(err, "SIM_IDLE")
+    truthy(reboots >= 5, "reboots " .. reboots)
+    local result = h.lastResult()
+    eq(result.job, "d1") eq(result.ok, true, tostring(result.error))
+    local cells = h.blocks(s)
+    for k in pairs(cells) do eq(sim.get(h.at(k)), nil, "undug " .. k) end
+    for _, k in ipairs(sim.dugLog) do
+      local _, y = h.at(k)
+      truthy(cells[k] or y <= 30, "collateral dig above the ground at " .. k)
+    end
+    eq(sim.t.x, 0) eq(sim.t.y, 31) eq(sim.t.z, 0)
+  end)
+
   ---------------------------------------------------------------- building
   -- <Claude> A turtle at 0,31,0 facing south (home), a chest below home with
   -- `stacks` stacks of block, the turtle holding o.inv.
   local function builder(o)
     o = o or {}
-    sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 2, fuel = o.fuel or 50000, inv = o.inv } }
+    sim.reset{ gps = false, turtle = { x = 0, y = 31, z = 0, h = 2, fuel = o.fuel or 50000, inv = o.inv },
+               terrain = o.terrain }
     h.saveState(2)
     sim.set(0, 30, 0, "minecraft:chest")
     local chest = sim.chests[sim.key(0, 30, 0)]
@@ -237,6 +309,29 @@ return function(test, eq, truthy, h)
     truthy(r2.ok, tostring(r2.error))
     built(open, (structure(shape, open, "hollow")), BRICKS, "cut ball")
     eq(sim.get(10, 47, 8), nil, "a cut is open: no lid")
+  end)
+
+  test("buildSphere touching=yes: lines a bowl dug half into the ground, not its rim in open air", function()
+    -- <Claude> Stone up to y=30, the bowl (a ball cut at 34, center y=31) already dug.
+    local shape = require("bot.shape")
+    local s = shape.cut(shape.ball(10, 31, 8, 9), 34)
+    local function ground(x, y, z) return y <= 30 and not shape.inside(s, x, y, z) end
+    local _, build = builder({ terrain = function(x, y, z) if ground(x, y, z) then return "minecraft:stone" end end })
+    local r = build.sphere({ x = 10, y = 31, z = 8, diameter = 9, block = BRICKS, fill = "hollow", top = 34,
+                             supply = "home", touching = "yes", part = 1, parts = 1 })
+    truthy(r.ok, tostring(r.error))
+    local want, n, shell = {}, 0, 0
+    for k in pairs((structure(shape, s, "hollow"))) do
+      local x, y, z = h.at(k)
+      shell = shell + 1
+      if ground(x, y - 1, z) or ground(x - 1, y, z) or ground(x + 1, y, z) or ground(x, y, z - 1) or ground(x, y, z + 1) then
+        want[k], n = true, n + 1
+      end
+    end
+    built(s, want, BRICKS, "lining")
+    eq(r.placed, n) eq(r.bare, shell - n)
+    truthy(n > 0 and shell - n > 0, "some placed, some bare")
+    for _, k in ipairs(sim.dugLog) do truthy(shape.inside(s, h.at(k)), "dug outside the bowl at " .. k) end
   end)
 
   test("buildBox: hollow, walls, solid and a flat rectangle are exactly their blocks", function()
@@ -393,6 +488,6 @@ return function(test, eq, truthy, h)
     parts = skill("buildBox").split(long, zs)
     eq(parts[1].parts, 2) truthy(parts[1].part ~= parts[2].part, "two shares")
     local cat = require("bot.plan").catalog(require("bot.skills").list)
-    truthy(cat:find("- buildSphere(x, y, z, diameter, block, fill=hollow, top=none, bottom=none, supply=home):", 1, true), cat)
+    truthy(cat:find("- buildSphere(x, y, z, diameter, block, fill=hollow, top=none, bottom=none, supply=home, touching=no):", 1, true), cat)
   end)
 end

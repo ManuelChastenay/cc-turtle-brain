@@ -17,7 +17,13 @@
   if needed (bot/inv.lua take).
   A block already in place is kept; anything else there is dug, except
   protected blocks (bot/config.lua), which are skipped.
-  Checkpoint after every block: { level, i, reversed, placed, kept, skipped, trips }.
+  touching (buildSphere touching=yes): a block is only placed when one of
+  its sides is something other than air, the build block or a turtle (the
+  top is not looked at: the turtle comes from there and may have dug it).
+  The turtle goes into the cell to look, so it is slower. The others are
+  left as they are (bare): e.g. a lining for a dug bowl that leaves out the
+  rim sticking up into open air.
+  Checkpoint after every block: { level, i, reversed, placed, kept, skipped, bare, trips }.
 ]]
 local nav = require("bot.nav")
 local inv = require("bot.inv")
@@ -88,9 +94,9 @@ local function supplySpot(supply)
 end
 
 -- <Claude> Builds share part of parts of s (bot/shape.lua) with block. fill:
--- "hollow", "walls" or "solid" (shape.ranges). Ends two blocks above the
--- structure, so a goHome after it flies over what was built.
-local function build(s, fill, block, supply, part, parts, ctx)
+-- "hollow", "walls" or "solid" (shape.ranges). touching: see the top. Ends
+-- two blocks above the structure, so a goHome after it flies over what was built.
+local function build(s, fill, block, supply, part, parts, touching, ctx)
   local saved = ctx and ctx.state
   if part > parts then return { ok = false, error = "part must be at most parts" } end
   local t = tile(s, fill, part, parts)
@@ -106,7 +112,7 @@ local function build(s, fill, block, supply, part, parts, ctx)
   end
 
   local placed, kept, skipped = saved and saved.placed or 0, saved and saved.kept or 0, saved and saved.skipped or 0
-  local trips = saved and saved.trips or 0
+  local bare, trips = saved and saved.bare or 0, saved and saved.trips or 0
   local function inTile(p) return p[t.u] >= t.u1 and p[t.u] <= t.u2 and p[t.v] >= t.v1 and p[t.v] <= t.v2 end
 
   -- <Claude> Straight up, across two blocks above the structure, then to dest.
@@ -150,8 +156,25 @@ local function build(s, fill, block, supply, part, parts, ctx)
     if not n then error(("cannot take %s at the supply: %s"):format(block, err), 0) end
     if n == 0 then error(("the supply has no %s (keep only that block in it)"):format(block), 0) end
   end
-  -- <Claude> "placed", "kept" or "skipped" for the block below; nil when out of blocks.
-  local function place()
+  -- <Claude> For touching: is a side of c other than the top something other
+  -- than air, the build block or a turtle? Looks from inside c (down first,
+  -- then around, stopping at the first one), then goes back above c.
+  local function touches(c)
+    local function solid(found, b)
+      return found and b.name ~= block and not b.name:find("computercraft:turtle", 1, true)
+    end
+    patiently(function() check(nav.goTo(c)) end)
+    local hit = solid(turtle.inspectDown())
+    for i = 1, 4 do
+      if hit then break end
+      if i > 1 then check(nav.face((nav.heading() + 1) % 4)) end
+      hit = solid(turtle.inspect())
+    end
+    patiently(function() above(c) end)
+    return hit
+  end
+  -- <Claude> "placed", "kept", "skipped" or "bare" for c, the block below; nil when out of blocks.
+  local function place(c)
     local found, below = turtle.inspectDown()
     if found and below.name == block then return "kept" end
     if found then
@@ -163,6 +186,7 @@ local function build(s, fill, block, supply, part, parts, ctx)
       if inv.freeSlots() < 2 then inv.discardJunk({ "top" }) end -- not below: that block is filled next
     end
     if not selectBlock() then return nil end
+    if touching and not touches(c) then return "bare" end
     for _ = 1, 10 do
       if turtle.placeDown() then return "placed" end
       sleep(0.5) -- a mob or a player in the way
@@ -187,16 +211,17 @@ local function build(s, fill, block, supply, part, parts, ctx)
             if not nav.refuel(need(c)) then error("fuel ran low: put coal in the supply", 0) end
           end
           patiently(function() above(c) end)
-          local r = place()
+          local r = place(c)
           if r == nil then
             refill()
             patiently(function() above(c) end)
-            r = place()
+            r = place(c)
           end
-          if r == "placed" then placed = placed + 1 elseif r == "kept" then kept = kept + 1 else skipped = skipped + 1 end
+          if r == "placed" then placed = placed + 1 elseif r == "kept" then kept = kept + 1
+          elseif r == "bare" then bare = bare + 1 else skipped = skipped + 1 end
           if ctx and ctx.save then
             ctx.save({ level = y, i = i + 1, reversed = reversed, placed = placed, kept = kept, skipped = skipped,
-                       trips = trips })
+                       bare = bare, trips = trips })
           end
         end
       end
@@ -210,20 +235,20 @@ local function build(s, fill, block, supply, part, parts, ctx)
     local p = nav.pos()
     return { ok = false, error = failure, placed = placed, at = ("%d,%d,%d"):format(p.x, p.y, p.z) }
   end
-  return { ok = true, placed = placed, kept = kept, skipped = skipped, trips = trips }
+  return { ok = true, placed = placed, kept = kept, skipped = skipped, bare = touching and bare or nil, trips = trips }
 end
 
 -- <Claude> Runs a build with the build block protected from digging (nav.keep).
 local function guarded(s, a, ctx)
   nav.keep = a.block
-  local ok, result = pcall(build, s, a.fill, a.block, a.supply, a.part, a.parts, ctx)
+  local ok, result = pcall(build, s, a.fill, a.block, a.supply, a.part, a.parts, a.touching == "yes", ctx)
   nav.keep = nil
   if not ok then error(result, 0) end
   return result
 end
 
 -- <Claude> args: x, y, z (center block), diameter, block, fill, top, bottom
--- (optional: only levels bottom..top, left open), supply, part, parts.
+-- (optional: only levels bottom..top, left open), supply, touching (no|yes), part, parts.
 function M.sphere(a, ctx)
   local s = shape.cut(shape.ball(a.x, a.y, a.z, a.diameter), a.top, a.bottom)
   if not s then return { ok = false, error = "no level of the sphere is between top and bottom" } end
